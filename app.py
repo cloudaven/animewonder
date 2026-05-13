@@ -976,7 +976,12 @@ def generate():
             return jsonify({"error":f"Your plan does not include {mode} mode. Upgrade to unlock.","quota_exceeded":True}), 403
 
     client   = anthropic.Anthropic(api_key=api_key)
-    max_toks = {"episode": 4000, "short": 16000, "movie": 32000}.get(mode, 4000)
+    # Why these numbers: the new kishōtenketsu-aware prompt with character_anchor
+    # fields per character is verbose. Episode at 4k tokens was getting truncated
+    # mid-string in late scenes (Justen hit `Unterminated string ... char 14667`
+    # in production). Bump everything; the 128k beta lifts the ceiling so we have
+    # room without paying for what we don't use.
+    max_toks = {"episode": 8000, "short": 24000, "movie": 48000}.get(mode, 8000)
 
     # Monarch and Admin get the stronger reasoning model — opus produces noticeably
     # better dramatic structure and dialogue subtext on longer pieces. Sonnet stays
@@ -984,22 +989,61 @@ def generate():
     tier_now = "admin" if session.get("is_admin") else session.get("tier", "free")
     story_model = "claude-opus-4-7" if (tier_now in ("monarch", "admin") and mode in ("short", "movie")) else "claude-sonnet-4-6"
 
+    # Content policy: admins (and Monarch tier) can push dark/violent/mature
+    # themes — that's the whole point of Justen's "dark fantasy hunter" tone.
+    # Explicit sexual content stays off across all tiers (Anthropic's safety
+    # filter would block it anyway; making it explicit avoids hard-to-debug
+    # rejections mid-generation).
+    is_mature = tier_now in ("monarch", "admin")
+    mature_policy = (
+        "\nCONTENT POLICY: graphic violence, dark themes, moral ambiguity, blood, "
+        "body horror, and intense psychological drama are all welcome — match the "
+        "tone of a TV-MA anime (Berserk, Tokyo Ghoul, Attack on Titan). "
+        "AVOID: explicit sexual content, nudity, or sexualized minors. "
+        "Suggestive tension is fine; explicit acts are not."
+        if is_mature else
+        "\nKeep the tone PG-13: action and tension are fine, but no explicit gore "
+        "or sexual content."
+    )
+
+    system_prompt = (
+        "You are a master anime writer and director. "
+        "Always respond with valid JSON only — no markdown, no code blocks. "
+        "Keep field values short enough that the full JSON fits inside the "
+        "max_tokens budget — truncated responses are worse than slightly shorter ones."
+        + mature_policy
+    )
+
     create_kwargs = dict(
         model=story_model,
         max_tokens=max_toks,
-        system="You are a master anime writer and director. Always respond with valid JSON only — no markdown, no code blocks.",
+        system=system_prompt,
         messages=[{"role": "user", "content": build_prompt(concept, mode, style_key)}],
+        # Use extended-output beta on every mode now that episode also exceeds the
+        # default 8k Sonnet cap. Harmless if the actual response fits comfortably.
+        extra_headers={"anthropic-beta": "output-128k-2025-02-19"},
     )
-    # Extended output beta — allows up to 128K output tokens (needed for short/movie)
-    if mode in ("short", "movie"):
-        create_kwargs["extra_headers"] = {"anthropic-beta": "output-128k-2025-02-19"}
-
-    response = client.messages.create(**create_kwargs)
 
     try:
-        story = json.loads(extract_json(response.content[0].text))
+        response = client.messages.create(**create_kwargs)
+    except anthropic.APIError as e:
+        return jsonify({"error": f"Claude API error: {str(e)[:200]}"}), 502
+    except Exception as e:
+        return jsonify({"error": f"Unexpected error calling Claude: {str(e)[:200]}"}), 500
+
+    raw_text = response.content[0].text if response.content else ""
+    try:
+        story = json.loads(extract_json(raw_text))
     except json.JSONDecodeError as e:
-        return jsonify({"error":f"Story parse failed: {e}"}), 500
+        # If we ran out of token budget the response is truncated mid-JSON.
+        # Surface a clean, actionable error rather than a parser exception.
+        stop_reason = getattr(response, "stop_reason", "")
+        if stop_reason == "max_tokens":
+            return jsonify({
+                "error": (f"Generation hit the {max_toks}-token cap before finishing. "
+                          f"Try a shorter concept, or pick Episode if you used Movie/Short.")
+            }), 500
+        return jsonify({"error": f"Story parse failed: {e}"}), 500
 
     # Stamp the style onto the story so re-opening from the library
     # or exporting later uses the same visual treatment.
