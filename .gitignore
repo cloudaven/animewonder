@@ -1,0 +1,21 @@
+# Secrets — never commit
+.env
+.env.*
+.flask_secret
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# SQLite database (contains user records)
+users.db
+
+# Test/scratch artifacts
+_test*.mp4
+_test*.jpg
+_test*.png
+
+# OS
+.DS_Store
+Thumbs.db

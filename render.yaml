@@ -1,0 +1,55 @@
+# Render.com one-click deploy config. To use:
+#   1. Push this folder to a GitHub repo (private is fine)
+#   2. On Render: New + → Blueprint → connect the repo → Render reads this file
+#
+# Free tier: $0/mo. Sleeps after 15 min idle, first request after sleep takes
+# ~30 sec cold start. 750 hours/mo of uptime (enough for one app 24/7).
+#
+# Persistent disk (`disk:` below) is $1/mo per 1GB and keeps users.db alive
+# across deploys/restarts. Without it, every redeploy wipes user accounts.
+# If you're just validating, you can comment out the `disk:` block to stay
+# fully free — just know SQLite resets on restart.
+
+services:
+  - type: web
+    name: animeforge
+    runtime: python
+    plan: free
+    region: oregon  # closest free region; change if you have latency-sensitive users elsewhere
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --workers 1 --threads 8 --timeout 0 --bind 0.0.0.0:$PORT
+    healthCheckPath: /login
+    # Persistent disk so users.db survives restarts. Comment out to stay 100% free.
+    disk:
+      name: animeforge-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: ANIMEFORGE_DB_PATH
+        value: /var/data/users.db
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: PAYPAL_MODE
+        value: sandbox
+      - key: FLASK_ENV
+        value: production
+      # Set these in the Render dashboard (Environment tab) — do NOT commit values:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: ADMIN_USER
+        sync: false
+      - key: ADMIN_PASS
+        sync: false
+      - key: SECRET_KEY
+        sync: false
+      - key: FAL_KEY
+        sync: false
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_SECRET
+        sync: false
+      - key: PAYPAL_PLAN_HUNTER
+        sync: false
+      - key: PAYPAL_PLAN_MONARCH
+        sync: false

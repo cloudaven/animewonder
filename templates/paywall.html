@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AnimeForge — Unlock Access</title>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Noto+Sans+JP:wght@300;400;700&display=swap" rel="stylesheet">
+  <style>
+    :root{ --blue:#0af; --purple:#6600ff; --gold:#ffcc00; --dark:#010309; --border:rgba(0,170,255,.18); }
+    *{ margin:0; padding:0; box-sizing:border-box; }
+    body{
+      background:var(--dark); color:#fff;
+      font-family:'Noto Sans JP',sans-serif;
+      min-height:100vh; display:flex; flex-direction:column;
+      align-items:center; justify-content:center; padding:30px 20px;
+    }
+    body::before{
+      content:''; position:fixed; inset:0;
+      background:radial-gradient(ellipse at 50% 30%,rgba(0,100,255,.12) 0%,transparent 60%),
+                 radial-gradient(ellipse at 15% 80%,rgba(102,0,255,.12) 0%,transparent 50%);
+      pointer-events:none;
+    }
+    .wrap{ position:relative; z-index:1; width:100%; max-width:540px; text-align:center; }
+
+    .rank{
+      display:inline-block; margin-bottom:18px;
+      background:rgba(255,204,0,.08); border:1px solid rgba(255,204,0,.3);
+      border-radius:4px; padding:5px 20px;
+      font-family:'Orbitron',sans-serif; font-size:.7rem; letter-spacing:.35em;
+      color:var(--gold); text-shadow:0 0 10px rgba(255,204,0,.5);
+    }
+    h1{
+      font-family:'Orbitron',sans-serif;
+      font-size:clamp(1.6rem,5vw,2.8rem); font-weight:900;
+      background:linear-gradient(135deg,#fff,var(--blue));
+      -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+      background-clip:text; letter-spacing:.04em; margin-bottom:10px;
+    }
+    .sub{ font-size:.85rem; color:rgba(255,255,255,.45); letter-spacing:.4em; margin-bottom:36px; }
+
+    .price-card{
+      background:rgba(0,10,30,.7);
+      border:1px solid var(--border); border-radius:18px;
+      padding:36px 32px; margin-bottom:18px;
+      backdrop-filter:blur(24px);
+      box-shadow:0 0 80px rgba(0,100,255,.12),inset 0 0 30px rgba(0,170,255,.03);
+    }
+    .price-tabs{ display:flex; gap:8px; margin-bottom:22px; }
+    .ptab{
+      flex:1; padding:9px; background:rgba(0,0,0,.3); border:1px solid rgba(0,170,255,.12);
+      border-radius:8px; text-align:center; cursor:pointer; transition:all .2s;
+      font-family:'Orbitron',sans-serif; font-size:.62rem; letter-spacing:.12em;
+      color:rgba(255,255,255,.38);
+    }
+    .ptab.active{ background:rgba(0,170,255,.12); border-color:var(--blue); color:#fff; }
+
+    .plan-block{ display:none; }
+    .plan-block.active{ display:block; }
+
+    .price-amount{
+      font-family:'Orbitron',sans-serif;
+      font-size:3rem; font-weight:900; color:#fff; line-height:1;
+    }
+    .price-amount sup{ font-size:1.3rem; vertical-align:super; color:var(--blue); }
+    .price-period{ font-size:.78rem; color:rgba(255,255,255,.38); letter-spacing:.15em; margin:6px 0 24px; }
+
+    .features{ list-style:none; text-align:left; margin-bottom:24px; }
+    .features li{
+      padding:8px 0; border-bottom:1px solid rgba(0,170,255,.07);
+      font-size:.88rem; color:rgba(255,255,255,.75);
+      display:flex; align-items:center; gap:12px;
+    }
+    .features li:last-child{ border-bottom:none; }
+    .ic{ font-size:.65rem; flex-shrink:0; }
+    .ic-hunter{ color:#aa77ff; }
+    .ic-monarch{ color:var(--gold); }
+
+    .cta{
+      width:100%; padding:16px;
+      background:linear-gradient(90deg,var(--purple),var(--blue));
+      background-size:200%; animation:shift 4s linear infinite;
+      border:none; border-radius:10px; color:#fff;
+      font-family:'Orbitron',sans-serif; font-size:.88rem;
+      font-weight:700; letter-spacing:.2em; cursor:pointer;
+      transition:transform .25s,box-shadow .25s;
+    }
+    .cta.gold{ background:linear-gradient(90deg,#886600,var(--gold)); color:#000; animation:none; }
+    @keyframes shift{ 0%,100%{background-position:0%} 50%{background-position:100%} }
+    .cta:hover{ transform:translateY(-2px); box-shadow:0 10px 40px rgba(0,170,255,.4); }
+
+    .footer-note{ font-size:.73rem; color:rgba(255,255,255,.26); margin-top:14px; line-height:1.6; }
+    .logout-link{ margin-top:22px; font-size:.8rem; color:rgba(255,255,255,.28); }
+    .logout-link a{ color:rgba(0,170,255,.5); text-decoration:none; }
+    .logout-link a:hover{ color:var(--blue); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="rank">S-RANK ACCESS REQUIRED</div>
+    <h1>UNLOCK THE GATE</h1>
+    <p class="sub">アニメ創造 · FULL ACCESS</p>
+
+    <div class="price-card">
+      <div class="price-tabs">
+        <div class="ptab active" onclick="switchPlan('hunter',this)">B-RANK · HUNTER</div>
+        <div class="ptab" onclick="switchPlan('monarch',this)">S-RANK · MONARCH</div>
+      </div>
+
+      <!-- Hunter -->
+      <div class="plan-block active" id="plan-hunter">
+        <div class="price-amount"><sup>$</sup>9<span style="font-size:1.1rem">.99</span></div>
+        <div class="price-period">/ MONTH · CANCEL ANYTIME</div>
+        <ul class="features">
+          <li><span class="ic ic-hunter">◈</span> 5 episodes per month</li>
+          <li><span class="ic ic-hunter">◈</span> Episode + Short Film mode</li>
+          <li><span class="ic ic-hunter">◈</span> 1080p · 30fps AI scene artwork</li>
+          <li><span class="ic ic-hunter">◈</span> 30fps MP4 video export</li>
+          <li><span class="ic ic-hunter">◈</span> Live render preview while exporting</li>
+          <li><span class="ic ic-hunter">◈</span> TTS narration + voice acting</li>
+        </ul>
+        <button class="cta" onclick="goUpgrade()">▶ UPGRADE TO HUNTER — $9.99/MO</button>
+      </div>
+
+      <!-- Monarch -->
+      <div class="plan-block" id="plan-monarch">
+        <div class="price-amount"><sup>$</sup>49<span style="font-size:1.1rem">.99</span></div>
+        <div class="price-period">/ MONTH · CANCEL ANYTIME</div>
+        <ul class="features">
+          <li><span class="ic ic-monarch">◈</span> 100 episodes per month</li>
+          <li><span class="ic ic-monarch">◈</span> Episode + Short Film + Full Movie</li>
+          <li><span class="ic ic-monarch">◈</span> 12-Episode Season mode with series bible</li>
+          <li><span class="ic ic-monarch">◈</span> 4K UHD 30fps (3840×2160) AI artwork</li>
+          <li><span class="ic ic-monarch">◈</span> 4K 30fps MP4 export (full 1hr+)</li>
+          <li><span class="ic ic-monarch">◈</span> Live scene preview · ETA timer</li>
+          <li><span class="ic ic-monarch">◈</span> TTS narration + dialogue audio</li>
+        </ul>
+        <button class="cta gold" onclick="goUpgrade()">▶ BECOME SHADOW MONARCH — $49.99/MO</button>
+      </div>
+    </div>
+
+    <div class="footer-note">Secure payments via PayPal · Cancel anytime from your account</div>
+    <div class="logout-link">Wrong account? <a href="/logout">Log out</a> &nbsp;·&nbsp; <a href="/">Back to app</a></div>
+  </div>
+
+  <script>
+    function switchPlan(plan, btn) {
+      document.querySelectorAll('.ptab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.plan-block').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      document.getElementById('plan-' + plan).classList.add('active');
+    }
+    function goUpgrade() { window.location.href = '/upgrade'; }
+  </script>
+</body>
+</html>

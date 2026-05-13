@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AnimeForge — Admin</title>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Noto+Sans+JP:wght@300;400;700&display=swap" rel="stylesheet">
+  <style>
+    :root{ --blue:#00aaff; --blue2:#0055cc; --purple:#6600ff; --gold:#ffcc00;
+           --green:#00cc66; --red:#ff4444; --dark:#010309; --border:rgba(0,170,255,.18);
+           --card:rgba(0,8,28,.8); }
+    *,*::before,*::after{ margin:0; padding:0; box-sizing:border-box; }
+    body{ background:var(--dark); color:#fff; font-family:'Noto Sans JP',sans-serif;
+          min-height:100vh; padding:24px 16px 48px; }
+    body::before{ content:''; position:fixed; inset:0; pointer-events:none;
+      background:radial-gradient(ellipse at 50% 20%,rgba(0,100,255,.08) 0%,transparent 55%),
+                 radial-gradient(ellipse at 90% 80%,rgba(102,0,255,.07) 0%,transparent 50%); }
+
+    .wrap{ position:relative; z-index:1; max-width:1100px; margin:0 auto; }
+
+    /* ── Header ── */
+    .admin-header{ display:flex; align-items:center; justify-content:space-between;
+                   margin-bottom:28px; flex-wrap:wrap; gap:12px; }
+    .admin-title{ font-family:'Orbitron',sans-serif; font-size:1.3rem; font-weight:900;
+                  background:linear-gradient(135deg,#fff,var(--blue));
+                  -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; }
+    .admin-sub{ font-size:.62rem; color:rgba(0,170,255,.4); letter-spacing:.3em; margin-top:2px; }
+    .hbtns{ display:flex; gap:8px; }
+    .hbtn{ background:rgba(0,170,255,.07); border:1px solid var(--border); border-radius:7px;
+           color:var(--blue); padding:7px 14px; font-size:.65rem; font-family:'Orbitron',sans-serif;
+           letter-spacing:.1em; cursor:pointer; transition:all .2s; text-decoration:none; display:inline-block; }
+    .hbtn:hover{ background:rgba(0,170,255,.18); border-color:var(--blue); }
+    .hbtn.red{ color:var(--red); border-color:rgba(255,68,68,.2); background:rgba(255,0,0,.05); }
+    .hbtn.red:hover{ background:rgba(255,0,0,.14); border-color:var(--red); }
+
+    /* ── Stats row ── */
+    .stats-row{ display:grid; grid-template-columns:repeat(auto-fill,minmax(140px,1fr)); gap:12px; margin-bottom:28px; }
+    .stat-card{ background:var(--card); border:1px solid var(--border); border-radius:12px;
+                padding:16px 14px; text-align:center; }
+    .stat-num{ font-family:'Orbitron',sans-serif; font-size:1.8rem; font-weight:900;
+               color:var(--blue); line-height:1; }
+    .stat-lbl{ font-size:.62rem; color:rgba(255,255,255,.35); letter-spacing:.2em;
+               text-transform:uppercase; margin-top:5px; }
+
+    /* ── PayPal store status ── */
+    .store-card{ background:var(--card); border:1px solid var(--border); border-radius:14px;
+                 padding:20px 22px; margin-bottom:24px; }
+    .store-header{ display:flex; align-items:center; justify-content:space-between;
+                   margin-bottom:14px; flex-wrap:wrap; gap:10px; }
+    .store-title{ font-family:'Orbitron',sans-serif; font-size:.72rem; color:var(--blue);
+                  letter-spacing:.2em; text-transform:uppercase; }
+    .store-badge{ padding:4px 12px; border-radius:4px; font-family:'Orbitron',sans-serif;
+                  font-size:.6rem; letter-spacing:.2em; }
+    .badge-live{ background:rgba(0,204,102,.1); border:1px solid rgba(0,204,102,.35); color:var(--green); }
+    .badge-sandbox{ background:rgba(255,204,0,.08); border:1px solid rgba(255,204,0,.3); color:var(--gold); }
+    .badge-uncfg{ background:rgba(255,68,68,.08); border:1px solid rgba(255,68,68,.3); color:var(--red); }
+    .store-grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:10px; }
+    .store-field{ background:rgba(0,0,0,.3); border:1px solid rgba(0,170,255,.1); border-radius:8px;
+                  padding:10px 13px; }
+    .sf-lbl{ font-size:.6rem; color:rgba(0,170,255,.5); letter-spacing:.18em;
+             text-transform:uppercase; margin-bottom:4px; }
+    .sf-val{ font-family:'Orbitron',sans-serif; font-size:.7rem;
+             color:rgba(255,255,255,.7); word-break:break-all; }
+    .sf-val.ok{ color:var(--green); }
+    .sf-val.missing{ color:var(--red); }
+    .env-hint{ margin-top:14px; background:rgba(255,204,0,.04); border:1px solid rgba(255,204,0,.15);
+               border-radius:8px; padding:12px 14px; font-size:.75rem; color:rgba(255,255,255,.45);
+               line-height:1.7; }
+    .env-hint code{ color:var(--gold); font-family:monospace; font-size:.82rem; }
+
+    /* ── Users table ── */
+    .section-title{ font-family:'Orbitron',sans-serif; font-size:.72rem; color:var(--blue);
+                    letter-spacing:.22em; text-transform:uppercase; margin-bottom:14px; }
+    .table-wrap{ background:var(--card); border:1px solid var(--border); border-radius:14px;
+                 overflow:hidden; }
+    table{ width:100%; border-collapse:collapse; }
+    thead{ background:rgba(0,170,255,.06); }
+    th{ padding:11px 14px; font-family:'Orbitron',sans-serif; font-size:.58rem;
+        color:rgba(0,170,255,.6); letter-spacing:.18em; text-transform:uppercase;
+        text-align:left; white-space:nowrap; }
+    td{ padding:11px 14px; font-size:.78rem; color:rgba(255,255,255,.72);
+        border-top:1px solid rgba(0,170,255,.06); vertical-align:middle; }
+    tr:hover td{ background:rgba(0,170,255,.03); }
+    .tier-pill{ display:inline-block; padding:3px 10px; border-radius:4px;
+                font-family:'Orbitron',sans-serif; font-size:.58rem; letter-spacing:.12em;
+                font-weight:700; white-space:nowrap; }
+    .tier-free   { background:rgba(0,170,255,.08); border:1px solid rgba(0,170,255,.2); color:var(--blue); }
+    .tier-hunter { background:rgba(102,0,255,.12); border:1px solid rgba(102,0,255,.3); color:#aa77ff; }
+    .tier-monarch{ background:rgba(255,204,0,.1); border:1px solid rgba(255,204,0,.3); color:var(--gold); }
+    .tier-select{ background:rgba(0,0,0,.4); border:1px solid rgba(0,170,255,.2); border-radius:6px;
+                  color:#fff; padding:4px 8px; font-family:'Orbitron',sans-serif; font-size:.6rem;
+                  cursor:pointer; margin-right:6px; }
+    .tier-select option{ background:#010923; }
+    .btn-sm{ padding:4px 10px; font-family:'Orbitron',sans-serif; font-size:.58rem;
+             letter-spacing:.08em; border:none; border-radius:5px; cursor:pointer;
+             transition:all .2s; }
+    .btn-save{ background:rgba(0,170,255,.15); border:1px solid rgba(0,170,255,.3); color:var(--blue); }
+    .btn-save:hover{ background:rgba(0,170,255,.3); }
+    .btn-del{ background:rgba(255,68,68,.08); border:1px solid rgba(255,68,68,.25); color:var(--red); }
+    .btn-del:hover{ background:rgba(255,68,68,.2); }
+    .sub-id{ font-size:.62rem; color:rgba(255,255,255,.3); font-family:monospace;
+             max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .no-sub{ color:rgba(255,255,255,.2); font-size:.68rem; }
+    .toast{ position:fixed; bottom:24px; right:24px; background:rgba(0,204,102,.15);
+            border:1px solid rgba(0,204,102,.35); border-radius:9px; padding:11px 18px;
+            font-family:'Orbitron',sans-serif; font-size:.68rem; color:var(--green);
+            letter-spacing:.1em; z-index:999; display:none; }
+
+    @media(max-width:700px){
+      th:nth-child(5),td:nth-child(5),
+      th:nth-child(6),td:nth-child(6){ display:none; }
+    }
+  </style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="admin-header">
+    <div>
+      <div class="admin-title">ANIMEFORGE ADMIN</div>
+      <div class="admin-sub">★ STORE &amp; USER MANAGEMENT</div>
+    </div>
+    <div class="hbtns">
+      <a class="hbtn" href="/">← APP</a>
+      <a class="hbtn" href="/upgrade">STORE PAGE</a>
+      <a class="hbtn red" href="/logout">LOGOUT</a>
+    </div>
+  </div>
+
+  <!-- Stats -->
+  <div class="stats-row">
+    <div class="stat-card">
+      <div class="stat-num">{{ stats.total }}</div>
+      <div class="stat-lbl">Total Users</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-num" style="color:var(--blue)">{{ stats.free }}</div>
+      <div class="stat-lbl">Free</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-num" style="color:#aa77ff">{{ stats.hunter }}</div>
+      <div class="stat-lbl">Hunter</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-num" style="color:var(--gold)">{{ stats.monarch }}</div>
+      <div class="stat-lbl">Monarch</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-num" style="color:var(--green)">{{ stats.projects }}</div>
+      <div class="stat-lbl">Projects</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-num" style="color:var(--purple)">{{ stats.seasons }}</div>
+      <div class="stat-lbl">Seasons</div>
+    </div>
+  </div>
+
+  <!-- PayPal Store Status -->
+  <div class="store-card">
+    <div class="store-header">
+      <div class="store-title">// PayPal Store</div>
+      {% if pp_ok %}
+        <span class="store-badge badge-{{ pp_mode }}">{{ pp_mode|upper }} · LIVE</span>
+      {% else %}
+        <span class="store-badge badge-uncfg">NOT CONFIGURED</span>
+      {% endif %}
+    </div>
+    <div class="store-grid">
+      <div class="store-field">
+        <div class="sf-lbl">Client ID</div>
+        <div class="sf-val {% if pp_ok %}ok{% else %}missing{% endif %}">
+          {% if pp_ok %}Configured ✓{% else %}Missing ✗{% endif %}
+        </div>
+      </div>
+      <div class="store-field">
+        <div class="sf-lbl">Secret</div>
+        <div class="sf-val {% if pp_ok %}ok{% else %}missing{% endif %}">
+          {% if pp_ok %}Configured ✓{% else %}Missing ✗{% endif %}
+        </div>
+      </div>
+      <div class="store-field">
+        <div class="sf-lbl">Hunter Plan ID</div>
+        <div class="sf-val {% if pp_ok %}ok{% else %}missing{% endif %}">
+          {% if pp_ok %}Configured ✓{% else %}Missing ✗{% endif %}
+        </div>
+      </div>
+      <div class="store-field">
+        <div class="sf-lbl">Monarch Plan ID</div>
+        <div class="sf-val {% if pp_ok %}ok{% else %}missing{% endif %}">
+          {% if pp_ok %}Configured ✓{% else %}Missing ✗{% endif %}
+        </div>
+      </div>
+      <div class="store-field">
+        <div class="sf-lbl">Mode</div>
+        <div class="sf-val {% if pp_mode=='live' %}ok{% else %}missing{% endif %}">{{ pp_mode|upper }}</div>
+      </div>
+      <div class="store-field">
+        <div class="sf-lbl">Webhook URL</div>
+        <div class="sf-val ok">/paypal-webhook</div>
+      </div>
+    </div>
+  </div><!-- /store-card -->
+
+  <!-- Kling Animation Status -->
+  <div class="store-card" style="margin-top:14px">
+    <div class="store-header">
+      <div class="store-title">// Kling Animation (fal.ai)</div>
+      {% if pika_ok %}
+        <span class="store-badge badge-live">CONFIGURED ✓</span>
+      {% else %}
+        <span class="store-badge badge-uncfg">NOT CONFIGURED</span>
+      {% endif %}
+    </div>
+    <div class="store-grid">
+      <div class="store-field">
+        <div class="sf-lbl">API Key</div>
+        <div class="sf-val {% if pika_ok %}ok{% else %}missing{% endif %}">
+          {% if pika_ok %}Set ✓{% else %}Missing ✗{% endif %}
+        </div>
+      </div>
+      <div class="store-field">
+        <div class="sf-lbl">Clip Duration</div>
+        <div class="sf-val ok">4 sec / scene</div>
+      </div>
+      <div class="store-field">
+        <div class="sf-lbl">Frame Rate</div>
+        <div class="sf-val ok">24 fps</div>
+      </div>
+      <div class="store-field">
+        <div class="sf-lbl">Resolution</div>
+        <div class="sf-val ok">1080p</div>
+      </div>
+    </div>
+    {% if not pika_ok %}
+    <div class="env-hint">
+      Animation runs <strong>free on your RTX 4070 Ti SUPER</strong> (no API key needed).<br>
+      Hit <strong>ANIMATE</strong> in the export overlay — SVD model downloads once (~7 GB) then runs locally forever.<br><br>
+      Optional: add <code>FAL_KEY=</code> to <code>.env</code> for cloud Kling animation (fal.ai — requires paid credits).
+    </div>
+    {% endif %}
+  </div>
+
+  {% if not pp_ok %}
+  <div class="env-hint" style="margin-top:10px">
+    Add to <code>.env</code> to activate PayPal store:<br>
+    <code>PAYPAL_CLIENT_ID=</code> — developer.paypal.com → Apps &amp; Credentials<br>
+    <code>PAYPAL_SECRET=</code> — same page, show secret<br>
+    <code>PAYPAL_PLAN_HUNTER=</code> — $9.99/mo plan in PayPal Catalog<br>
+    <code>PAYPAL_PLAN_MONARCH=</code> — $49.99/mo plan<br>
+    <code>PAYPAL_MODE=live</code> (or <code>sandbox</code> for testing)<br>
+    Webhook URL: <code>https://yourdomain.com/paypal-webhook</code>
+  </div>
+  {% endif %}
+
+  <!-- Users Table -->
+  <div class="section-title">// All Users</div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Email</th>
+          <th>Tier</th>
+          <th>Usage</th>
+          <th>PayPal Sub</th>
+          <th>Joined</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="users-tbody">
+        {% for u in users %}
+        <tr id="row-{{ u.id }}">
+          <td style="color:rgba(255,255,255,.3)">{{ u.id }}</td>
+          <td>{{ u.email }}</td>
+          <td>
+            <span class="tier-pill tier-{{ u.tier }}">{{ u.tier|upper }}</span>
+          </td>
+          <td style="font-family:'Orbitron',sans-serif;font-size:.68rem">
+            {{ u.episodes_used }}/{% if u.tier=='free' %}2{% elif u.tier=='hunter' %}5{% else %}100{% endif %}
+            <span style="color:rgba(255,255,255,.2);font-size:.58rem"> · {{ u.period_month }}</span>
+          </td>
+          <td>
+            {% if u.paypal_subscription_id %}
+              <span class="sub-id" title="{{ u.paypal_subscription_id }}">{{ u.paypal_subscription_id }}</span>
+            {% else %}
+              <span class="no-sub">—</span>
+            {% endif %}
+          </td>
+          <td style="color:rgba(255,255,255,.35);font-size:.7rem">{{ (u.created_at or '')[:10] }}</td>
+          <td>
+            <select class="tier-select" id="sel-{{ u.id }}">
+              <option value="free"    {% if u.tier=='free'    %}selected{% endif %}>Free</option>
+              <option value="hunter"  {% if u.tier=='hunter'  %}selected{% endif %}>Hunter</option>
+              <option value="monarch" {% if u.tier=='monarch' %}selected{% endif %}>Monarch</option>
+            </select>
+            <button class="btn-sm btn-save" onclick="setTier({{ u.id }})">SET</button>
+            <button class="btn-sm btn-del" onclick="delUser({{ u.id }}, {{ u.email|tojson }})">DEL</button>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7" style="text-align:center;color:rgba(255,255,255,.25);padding:24px">No users yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  function toast(msg, ok=true){
+    const el = document.getElementById('toast');
+    el.textContent = msg;
+    el.style.display = 'block';
+    el.style.color = ok ? 'var(--green)' : 'var(--red)';
+    el.style.borderColor = ok ? 'rgba(0,204,102,.35)' : 'rgba(255,68,68,.35)';
+    el.style.background = ok ? 'rgba(0,204,102,.12)' : 'rgba(255,68,68,.1)';
+    setTimeout(() => el.style.display = 'none', 3000);
+  }
+
+  async function setTier(uid) {
+    const tier = document.getElementById('sel-' + uid).value;
+    const res  = await fetch('/admin/set-tier', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({user_id: uid, tier})
+    });
+    const d = await res.json();
+    if (d.success) {
+      const row = document.getElementById('row-' + uid);
+      const pill = row.querySelector('.tier-pill');
+      pill.className = 'tier-pill tier-' + tier;
+      pill.textContent = tier.toUpperCase();
+      toast('Tier updated to ' + tier.toUpperCase());
+    } else {
+      toast('Failed: ' + (d.error || 'unknown'), false);
+    }
+  }
+
+  async function delUser(uid, email) {
+    if (!confirm('Delete user ' + email + '?\nThis removes all their projects and seasons.')) return;
+    const res = await fetch('/admin/delete-user/' + uid, {method: 'DELETE'});
+    const d   = await res.json();
+    if (d.success) {
+      document.getElementById('row-' + uid).remove();
+      toast('User deleted');
+    } else {
+      toast('Delete failed', false);
+    }
+  }
+</script>
+</body>
+</html>

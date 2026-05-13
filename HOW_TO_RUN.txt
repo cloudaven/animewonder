@@ -1,0 +1,170 @@
+============================================================
+  ANIMEFORGE — COMPLETE SETUP GUIDE
+============================================================
+
+STEP 1 — Install Python packages
+---------------------------------
+    pip install -r requirements.txt
+
+  Also install ffmpeg (needed for video export):
+    Download from: https://ffmpeg.org/download.html
+    Extract and add the bin/ folder to your Windows PATH.
+    (Or just pip install imageio-ffmpeg — it auto-downloads ffmpeg)
+
+
+STEP 2 — Set environment variables
+------------------------------------
+Easiest: put them in a .env file next to app.py (already loaded automatically).
+Or set them in your shell:
+
+    set ANTHROPIC_API_KEY=your_anthropic_api_key
+    set ADMIN_USER=admin
+    set ADMIN_PASS=a_long_random_string     (REQUIRED — app refuses to start with
+                                              defaults like "changeme", "admin",
+                                              "password", "123456", or empty)
+    set SECRET_KEY=any_random_long_string   (optional — if unset, the app auto-
+                                              generates one and persists it to
+                                              .flask_secret next to app.py so
+                                              sessions survive restarts)
+
+  For PayPal payments (to charge users):
+    set PAYPAL_CLIENT_ID=your_paypal_client_id
+    set PAYPAL_SECRET=your_paypal_secret
+    set PAYPAL_MODE=sandbox              (DEFAULT — safe for testing)
+                                          (Set to 'live' ONLY when going to
+                                           production. Live mode requires
+                                           CLIENT_ID and SECRET to be set or
+                                           the app refuses to start.)
+    set PAYPAL_PLAN_HUNTER=P-...         (your $9.99/mo PayPal plan ID)
+    set PAYPAL_PLAN_MONARCH=P-...        (your $49.99/mo PayPal plan ID)
+
+
+STEP 3 — Run
+--------------
+    python app.py
+
+  Open:  http://localhost:5000
+
+
+============================================================
+  ADMIN LOGIN (free, unlimited everything)
+============================================================
+  Email:     value of ADMIN_USER (default: admin)
+  Password:  value of ADMIN_PASS (NO default — the app refuses to start without
+             a non-default value)
+
+  Admin bypasses all quota limits and can access Season mode.
+
+
+============================================================
+  TIER SYSTEM
+============================================================
+
+  FREE      (E-Rank)          — 2 episodes/month, no card needed
+  HUNTER    (B-Rank) $9.99/mo — 5 episodes, short film, video export
+  MONARCH   (S-Rank) $49.99/mo— 100 episodes, full movie, season mode,
+                                 12-episode season, video export
+  ADMIN                       — Unlimited everything
+
+  Quotas reset on the 1st of each month automatically.
+  Cancelled PayPal subscriptions → auto-downgrade to Free.
+
+
+============================================================
+  FEATURES BY TIER
+============================================================
+
+  ALL TIERS:
+  ✓ Unlimited episode viewing (what you've already generated)
+  ✓ Solo Leveling quality AI artwork (1920×1080 via Pollinations.ai)
+  ✓ Character voiceovers (browser TTS, free, works instantly)
+  ✓ Auto-play cinematic mode
+  ✓ Touch swipe on mobile
+  ✓ Save & reload projects
+
+  HUNTER + MONARCH + ADMIN:
+  ✓ Short Film mode (20 scenes)
+  ✓ MP4 video export with AI art + TTS narration
+  ✓ Save unlimited projects
+
+  MONARCH + ADMIN only:
+  ✓ Full Movie mode (40 scenes, ~1 hour video)
+  ✓ 12-Episode Season mode (series bible + per-episode generation)
+  ✓ Season saves persist — come back any time to generate more episodes
+
+
+============================================================
+  VOICE OVER
+============================================================
+
+  Voiceovers use the browser's built-in Speech Synthesis API.
+  - Click the 🔇 VOICE button to enable
+  - Each character gets a different voice automatically
+  - Emotion affects speed and pitch (angry = faster, sad = slower)
+  - Scene narration is read first, then dialogue plays in sequence
+  - Works on Chrome, Edge, Safari, Firefox
+
+  In exported VIDEO:
+  - gTTS (Google Text-to-Speech) narrates each scene
+  - Narrator reads: scene title, action description, then all dialogue
+  - Audio is baked into the MP4
+
+
+============================================================
+  VIDEO QUALITY & CRUNCHYROLL
+============================================================
+
+  Current output: 1920×1080 MP4, 24fps, H.264, AAC audio
+  - AI-generated images with cinematic Ken Burns motion
+  - Text-to-speech narration and dialogue
+  - Professional anime art style prompts (Solo Leveling aesthetic)
+
+  HONEST NOTE: This is a high-quality AI storyboard video.
+  Crunchyroll requires traditionally hand-drawn animation from
+  licensed studios — no AI tool today produces that. However,
+  this app creates genuinely impressive content you can:
+  ✓ Post on YouTube
+  ✓ Share on TikTok / Instagram Reels
+  ✓ Use as a proof-of-concept for a real series
+  ✓ Pitch to investors or co-creators with visuals
+
+  For TRUE animated clips: use Kling AI, Runway Gen-3, or Pika
+  Labs to take the generated images and add real motion (10-sec
+  video clips per image). Then stitch clips together.
+
+
+============================================================
+  PAYPAL SETUP (to charge users)
+============================================================
+
+1. Create PayPal Business account at paypal.com/business
+2. Go to: Developer Dashboard → My Apps → Create App
+   Copy Client ID → set as PAYPAL_CLIENT_ID
+   Copy Secret    → set as PAYPAL_SECRET
+3. Go to: Subscriptions → Plans → Create Plan
+   - Plan 1: $9.99/month → copy Plan ID → PAYPAL_PLAN_HUNTER
+   - Plan 2: $49.99/month → copy Plan ID → PAYPAL_PLAN_MONARCH
+4. Go to: Developer → Webhooks → Add Webhook
+   URL: https://yourdomain.com/paypal-webhook
+   Events: BILLING.SUBSCRIPTION.ACTIVATED
+           BILLING.SUBSCRIPTION.CANCELLED
+           BILLING.SUBSCRIPTION.SUSPENDED
+5. Restart the app with the new env vars
+
+  Users pay with their PayPal account (or card via PayPal).
+  Payment verified server-side before tier upgrade.
+  Cancellations automatically downgrade the user to Free.
+
+  TEST FIRST: Use PAYPAL_MODE=sandbox with sandbox credentials.
+
+
+============================================================
+  IMAGE GENERATION (completely free)
+============================================================
+
+  Uses Pollinations.ai — free, no API key, no rate limits.
+  Every image is 1920×1080 with optimized Solo Leveling prompts.
+  Each image takes 5–20 seconds to generate.
+  Video export downloads all images before rendering.
+
+============================================================

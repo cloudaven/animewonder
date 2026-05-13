@@ -1,0 +1,15 @@
+flask
+anthropic
+requests
+gtts
+moviepy
+pillow
+imageio-ffmpeg
+werkzeug
+python-dotenv
+edge-tts
+fal-client
+gunicorn
+# animate_worker.py deps — install under Python 3.12 only:
+# py -3.12 -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+# py -3.12 -m pip install diffusers accelerate transformers

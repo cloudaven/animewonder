@@ -1,0 +1,1483 @@
+import os, json, sqlite3, secrets, functools, datetime, threading, time, tempfile, shutil, asyncio, io, base64, subprocess, re
+from urllib.parse import quote
+import edge_tts
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"), override=True)
+
+import anthropic
+import requests as http
+from flask import (
+    Flask, render_template, request, jsonify,
+    session, redirect, url_for, flash, Response, send_file, after_this_request, stream_with_context
+)
+from werkzeug.security import generate_password_hash, check_password_hash
+
+from styles import STYLES, DEFAULT_STYLE, get as get_style, list_public as styles_public
+
+app = Flask(__name__)
+
+def _load_or_create_secret_key():
+    """SECRET_KEY policy:
+    - If env var SECRET_KEY is set, use it (production / multi-process correct).
+    - Else, persist a generated key to .flask_secret next to this file so sessions
+      survive restarts on a single dev box. Refusing to start would be safer for
+      production but breaks the documented `python app.py` quickstart, so we warn.
+    """
+    env_key = os.environ.get("SECRET_KEY", "").strip()
+    if env_key:
+        return env_key
+    secret_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".flask_secret")
+    try:
+        with open(secret_path, "r", encoding="utf-8") as f:
+            existing = f.read().strip()
+        if existing:
+            return existing
+    except FileNotFoundError:
+        pass
+    new_key = secrets.token_hex(32)
+    try:
+        with open(secret_path, "w", encoding="utf-8") as f:
+            f.write(new_key)
+        try:
+            os.chmod(secret_path, 0o600)
+        except (OSError, NotImplementedError):
+            pass  # Windows: best-effort
+    except OSError as exc:
+        print(f"[anime_app] WARN: could not persist SECRET_KEY to {secret_path}: {exc}", flush=True)
+        print("[anime_app] WARN: sessions will be invalidated on every restart.", flush=True)
+        return new_key
+    print(f"[anime_app] Generated and persisted SECRET_KEY to {secret_path}.", flush=True)
+    print("[anime_app] For production, set SECRET_KEY in the environment instead.", flush=True)
+    return new_key
+
+app.secret_key = _load_or_create_secret_key()
+
+# Session-cookie hardening. SameSite=Lax blocks the browser from sending the session
+# cookie on cross-site POSTs, which is the practical CSRF defense for an app that
+# doesn't use CSRF tokens. Secure=True (HTTPS-only) is gated on FLASK_ENV so dev
+# over http://localhost still works.
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax',
+    SESSION_COOKIE_SECURE=os.environ.get('FLASK_ENV', 'development') == 'production',
+)
+
+PAYPAL_CLIENT_ID   = os.environ.get("PAYPAL_CLIENT_ID", "")
+PAYPAL_SECRET      = os.environ.get("PAYPAL_SECRET", "")
+# Default to sandbox so a misconfigured server cannot accidentally charge real cards.
+# Production must explicitly set PAYPAL_MODE=live.
+PAYPAL_MODE        = os.environ.get("PAYPAL_MODE", "sandbox").lower()
+if PAYPAL_MODE not in ("sandbox", "live"):
+    raise SystemExit(f"Refusing to start: PAYPAL_MODE must be 'sandbox' or 'live', got {PAYPAL_MODE!r}.")
+if PAYPAL_MODE == "live" and not (PAYPAL_CLIENT_ID and PAYPAL_SECRET):
+    raise SystemExit("Refusing to start: PAYPAL_MODE=live requires both PAYPAL_CLIENT_ID and PAYPAL_SECRET.")
+PAYPAL_PLAN_HUNTER = os.environ.get("PAYPAL_PLAN_HUNTER", "")
+PAYPAL_PLAN_MONARCH= os.environ.get("PAYPAL_PLAN_MONARCH", "")
+
+FAL_KEY = os.environ.get("FAL_KEY", "")
+
+# Validate at startup so a missing/typo'd key fails loudly during deploy
+# instead of producing cryptic 500s for the first user who hits a Claude-backed route.
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+if not ANTHROPIC_API_KEY:
+    raise SystemExit(
+        "Refusing to start: ANTHROPIC_API_KEY is unset.\n"
+        "Get a key at https://console.anthropic.com/settings/keys and set it in .env or the environment."
+    )
+if not ANTHROPIC_API_KEY.startswith("sk-ant-"):
+    print(
+        f"[anime_app] WARN: ANTHROPIC_API_KEY does not start with 'sk-ant-' — "
+        f"this looks malformed. Continuing anyway in case the key format changed.",
+        flush=True,
+    )
+
+ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
+ADMIN_PASS = os.environ.get("ADMIN_PASS", "")
+_ADMIN_PASS_DEFAULTS = {"", "changeme", "password", "admin", "123456"}
+if ADMIN_PASS in _ADMIN_PASS_DEFAULTS:
+    raise SystemExit(
+        "Refusing to start: ADMIN_PASS is unset or set to a known-default value.\n"
+        "Set a strong ADMIN_PASS in the environment (or .env) before launching.\n"
+        "Example PowerShell:  $env:ADMIN_PASS = 'a-long-random-string'\n"
+        "Example bash:        export ADMIN_PASS='a-long-random-string'"
+    )
+
+DB_PATH = os.path.join(os.path.dirname(__file__), "users.db")
+
+# Allow override for production hosts (Render, Fly, etc.) where the only writeable
+# location may be a mounted persistent disk, not the source folder.
+DB_PATH = os.environ.get("ANIMEFORGE_DB_PATH", DB_PATH)
+
+TIER_LIMITS = {"free": 2, "hunter": 5, "monarch": 100}
+SEASON_TIERS = {"monarch", "admin"}
+TIER_MODES   = {
+    "free":    {"episode"},
+    "hunter":  {"episode", "short"},
+    "monarch": {"episode", "short", "movie"},
+    "admin":   {"episode", "short", "movie"},
+}
+
+export_jobs = {}
+
+
+def extract_json(text):
+    text = text.strip()
+    # Strip markdown code fences
+    if "```" in text:
+        parts = text.split("```")
+        for part in parts:
+            if part.startswith("json"):
+                part = part[4:]
+            part = part.strip()
+            if part.startswith("{"):
+                text = part
+                break
+    # Find outermost JSON object
+    start = text.find("{")
+    if start == -1:
+        return text
+    # Walk to find the matching closing brace
+    depth = 0
+    for i, ch in enumerate(text[start:], start):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i+1]
+    # Response was cut off — return what we have and let the caller handle it
+    return text[start:]
+
+
+def paypal_base():
+    return "https://api-m.sandbox.paypal.com" if PAYPAL_MODE == "sandbox" else "https://api-m.paypal.com"
+
+def paypal_token():
+    r = http.post(f"{paypal_base()}/v1/oauth2/token",
+                  auth=(PAYPAL_CLIENT_ID, PAYPAL_SECRET),
+                  data={"grant_type": "client_credentials"}, timeout=15)
+    return r.json().get("access_token", "")
+
+
+# ── Database ───────────────────────────────────────────────────────────────────
+
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    # SQLite ignores `FOREIGN KEY ... ON DELETE CASCADE` unless this pragma is set
+    # per-connection. Without it, deleting a season leaves orphaned season_episodes,
+    # and deleting a user via admin leaves orphaned episodes for that user's seasons.
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def init_db():
+    with get_db() as db:
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                email                 TEXT    UNIQUE NOT NULL,
+                password_hash         TEXT    NOT NULL,
+                tier                  TEXT    NOT NULL DEFAULT 'free',
+                episodes_used         INTEGER NOT NULL DEFAULT 0,
+                period_month          TEXT    DEFAULT (strftime('%Y-%m','now')),
+                paypal_subscription_id TEXT,
+                created_at            TEXT    DEFAULT (datetime('now'))
+            )""")
+
+        # Saved projects (episodes, short films, movies)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS projects (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id     INTEGER NOT NULL,
+                type        TEXT    NOT NULL DEFAULT 'episode',
+                title       TEXT,
+                genre       TEXT,
+                data        TEXT,    -- JSON story blob
+                created_at  TEXT    DEFAULT (datetime('now')),
+                updated_at  TEXT    DEFAULT (datetime('now'))
+            )""")
+
+        # Season series bible + per-episode data
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS seasons (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id     INTEGER NOT NULL,
+                title       TEXT,
+                genre       TEXT,
+                bible       TEXT,    -- JSON series bible
+                created_at  TEXT    DEFAULT (datetime('now')),
+                updated_at  TEXT    DEFAULT (datetime('now'))
+            )""")
+
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS season_episodes (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                season_id       INTEGER NOT NULL,
+                episode_number  INTEGER NOT NULL,
+                title           TEXT,
+                data            TEXT,    -- JSON episode story (scenes, dialogue, etc.)
+                created_at      TEXT    DEFAULT (datetime('now')),
+                FOREIGN KEY (season_id) REFERENCES seasons(id) ON DELETE CASCADE
+            )""")
+
+        db.commit()
+
+
+def get_user(uid):
+    with get_db() as db:
+        return db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+
+
+def quota_check(user):
+    current = datetime.date.today().strftime("%Y-%m")
+    if user["period_month"] != current:
+        with get_db() as db:
+            db.execute("UPDATE users SET episodes_used=0, period_month=? WHERE id=?",
+                       (current, user["id"]))
+            db.commit()
+        used = 0
+    else:
+        used = user["episodes_used"]
+    tier  = user["tier"] or "free"
+    limit = TIER_LIMITS.get(tier, 2)
+    return used, limit, used < limit
+
+
+# ── Auth ───────────────────────────────────────────────────────────────────────
+
+def login_required(f):
+    @functools.wraps(f)
+    def w(*a, **kw):
+        if not session.get("user_id") and not session.get("is_admin"):
+            return redirect(url_for("login"))
+        return f(*a, **kw)
+    return w
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        email = request.form.get("email","").strip().lower()
+        pw    = request.form.get("password","")
+        if email == ADMIN_USER.lower() and secrets.compare_digest(pw, ADMIN_PASS):
+            session.clear(); session["is_admin"]=True; session["email"]=ADMIN_USER
+            return redirect(url_for("index"))
+        with get_db() as db:
+            user = db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+        if user and check_password_hash(user["password_hash"], pw):
+            session.clear()
+            session["user_id"]=user["id"]; session["email"]=user["email"]; session["tier"]=user["tier"]
+            return redirect(url_for("index"))
+        flash("Invalid email or password.")
+    return render_template("login.html")
+
+
+_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if request.method == "POST":
+        email = request.form.get("email","").strip().lower()
+        pw    = request.form.get("password","")
+        if not email or not _EMAIL_RE.match(email) or len(email) > 254:
+            flash("Enter a valid email address.")
+            return render_template("register.html")
+        if len(pw) < 6:
+            flash("Password must be at least 6 characters.")
+            return render_template("register.html")
+        try:
+            with get_db() as db:
+                db.execute("INSERT INTO users (email, password_hash) VALUES (?,?)",
+                           (email, generate_password_hash(pw)))
+                db.commit()
+                user = db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+            session.clear()
+            session["user_id"]=user["id"]; session["email"]=email; session["tier"]="free"
+            return redirect(url_for("index"))
+        except sqlite3.IntegrityError:
+            flash("An account with that email already exists.")
+    return render_template("register.html")
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+
+# ── PayPal ─────────────────────────────────────────────────────────────────────
+
+@app.route("/verify-paypal", methods=["POST"])
+@login_required
+def verify_paypal():
+    data   = request.json or {}
+    sub_id = data.get("subscription_id","")
+    plan   = data.get("plan","hunter")
+    if not PAYPAL_CLIENT_ID:
+        return jsonify({"error":"PayPal not configured."}), 500
+    try:
+        token = paypal_token()
+        sub   = http.get(f"{paypal_base()}/v1/billing/subscriptions/{sub_id}",
+                         headers={"Authorization":f"Bearer {token}"}, timeout=15).json()
+    except Exception as e:
+        return jsonify({"error":str(e)}), 500
+    if sub.get("status") == "ACTIVE":
+        uid = session.get("user_id")
+        with get_db() as db:
+            db.execute("UPDATE users SET tier=?, paypal_subscription_id=? WHERE id=?",
+                       (plan, sub_id, uid))
+            db.commit()
+        session["tier"] = plan
+        return jsonify({"success":True,"tier":plan})
+    return jsonify({"error":"Subscription not active yet."}), 400
+
+
+@app.route("/paypal-webhook", methods=["POST"])
+def paypal_webhook():
+    event    = request.json or {}
+    etype    = event.get("event_type","")
+    resource = event.get("resource",{})
+    sub_id   = resource.get("id") or resource.get("billing_agreement_id","")
+    if etype in ("BILLING.SUBSCRIPTION.CANCELLED","BILLING.SUBSCRIPTION.SUSPENDED","PAYMENT.SALE.DENIED"):
+        if sub_id:
+            with get_db() as db:
+                db.execute("UPDATE users SET tier='free' WHERE paypal_subscription_id=?",(sub_id,))
+                db.commit()
+    if etype == "BILLING.SUBSCRIPTION.ACTIVATED":
+        plan_id = resource.get("plan_id","")
+        tier    = "hunter" if plan_id == PAYPAL_PLAN_HUNTER else "monarch"
+        if sub_id:
+            with get_db() as db:
+                db.execute("UPDATE users SET tier=? WHERE paypal_subscription_id=?",(tier,sub_id))
+                db.commit()
+    return "", 200
+
+
+# ── Upgrade page ────────────────────────────────────────────────────────────────
+
+@app.route("/upgrade")
+@login_required
+def upgrade():
+    user  = get_user(session["user_id"]) if session.get("user_id") else None
+    tier  = "admin" if session.get("is_admin") else (user["tier"] if user else "free")
+    used, limit, _ = quota_check(user) if user else (0, 2, True)
+    return render_template("upgrade.html", tier=tier, used=used, limit=limit,
+                           email=session.get("email",""),
+                           paypal_client_id=PAYPAL_CLIENT_ID,
+                           paypal_plan_hunter=PAYPAL_PLAN_HUNTER,
+                           paypal_plan_monarch=PAYPAL_PLAN_MONARCH)
+
+
+# ── Project persistence ────────────────────────────────────────────────────────
+
+@app.route("/projects")
+@login_required
+def list_projects():
+    uid = session.get("user_id")
+    with get_db() as db:
+        if session.get("is_admin"):
+            projects = db.execute(
+                "SELECT id,type,title,genre,created_at,updated_at FROM projects ORDER BY updated_at DESC LIMIT 50"
+            ).fetchall()
+        else:
+            projects = db.execute(
+                "SELECT id,type,title,genre,created_at,updated_at FROM projects WHERE user_id=? ORDER BY updated_at DESC",
+                (uid,)
+            ).fetchall()
+    return jsonify({"projects": [dict(p) for p in projects]})
+
+
+@app.route("/save-project", methods=["POST"])
+@login_required
+def save_project():
+    uid  = session.get("user_id") or 0
+    data = request.json or {}
+    story = data.get("story") or {}
+    ptype = data.get("type","episode")
+    pid   = data.get("project_id")  # if updating existing
+
+    if not story:
+        return jsonify({"error":"No story data"}), 400
+
+    now = datetime.datetime.now().isoformat(timespec="seconds")
+    with get_db() as db:
+        if pid:
+            if session.get("is_admin"):
+                db.execute("UPDATE projects SET data=?, title=?, genre=?, updated_at=? WHERE id=?",
+                           (json.dumps(story), story.get("title",""), story.get("genre",""), now, pid))
+            else:
+                db.execute("UPDATE projects SET data=?, title=?, genre=?, updated_at=? WHERE id=? AND user_id=?",
+                           (json.dumps(story), story.get("title",""), story.get("genre",""), now, pid, uid))
+        else:
+            cur = db.execute(
+                "INSERT INTO projects (user_id, type, title, genre, data, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
+                (uid, ptype, story.get("title","Untitled"), story.get("genre",""),
+                 json.dumps(story), now, now)
+            )
+            pid = cur.lastrowid
+        db.commit()
+    return jsonify({"success":True, "project_id":pid})
+
+
+@app.route("/load-project/<int:pid>")
+@login_required
+def load_project(pid):
+    uid = session.get("user_id") or 0
+    with get_db() as db:
+        if session.get("is_admin"):
+            row = db.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
+        else:
+            row = db.execute("SELECT * FROM projects WHERE id=? AND user_id=?", (pid, uid)).fetchone()
+    if not row:
+        return jsonify({"error":"Not found"}), 404
+    return jsonify({"story": json.loads(row["data"]), "type": row["type"], "project_id": pid})
+
+
+@app.route("/delete-project/<int:pid>", methods=["DELETE"])
+@login_required
+def delete_project(pid):
+    uid = session.get("user_id") or 0
+    with get_db() as db:
+        if session.get("is_admin"):
+            db.execute("DELETE FROM projects WHERE id=?", (pid,))
+        else:
+            db.execute("DELETE FROM projects WHERE id=? AND user_id=?", (pid, uid))
+        db.commit()
+    return jsonify({"success":True})
+
+
+# ── Season routes ──────────────────────────────────────────────────────────────
+
+@app.route("/generate-season-bible", methods=["POST"])
+@login_required
+def generate_season_bible():
+    tier = "admin" if session.get("is_admin") else session.get("tier","free")
+    if tier not in SEASON_TIERS:
+        return jsonify({"error":"Season mode requires Shadow Monarch (S-Rank) or Admin account."}), 403
+
+    api_key = ANTHROPIC_API_KEY  # validated at module load
+
+    data    = request.json or {}
+    concept = (data.get("concept") or "").strip()
+    if not concept:
+        return jsonify({"error":"No concept provided"}), 400
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=16000,
+        extra_headers={"anthropic-beta": "output-128k-2025-02-19"},
+        system="You are a master anime showrunner. Always respond with valid JSON only — no markdown, no code blocks.",
+        messages=[{"role":"user","content":f"""Create a 12-episode anime season plan for: "{concept}"
+
+Return ONLY this JSON (be concise in each field):
+{{
+  "title": "Series title",
+  "subtitle": "Japanese subtitle",
+  "genre": "Genre tags",
+  "synopsis": "1-2 sentence series overview",
+  "world": "Setting description (1 sentence)",
+  "main_conflict": "Central conflict (1 sentence)",
+  "characters": [
+    {{"name":"Name","role":"Main/Supporting/Antagonist","arc":"One sentence arc","description":"Brief description"}}
+  ],
+  "episodes": [
+    {{
+      "episode_number": 1,
+      "title": "Episode Title",
+      "synopsis": "1-2 sentence summary",
+      "key_events": ["Event 1","Event 2"],
+      "character_focus": "Character name",
+      "tone": "tone/mood",
+      "cliffhanger": "One sentence cliffhanger",
+      "image_prompt": "anime key visual, [scene], Solo Leveling aesthetic, cinematic, 4K"
+    }}
+  ],
+  "season_arc": {{
+    "act1": "Episodes 1-4 summary",
+    "act2": "Episodes 5-8 summary",
+    "act3": "Episodes 9-12 summary"
+  }}
+}}
+
+Include all 12 episodes. Keep every field short — full detail comes when each episode is generated."""}]
+    )
+
+    try:
+        bible = json.loads(extract_json(response.content[0].text))
+    except json.JSONDecodeError as e:
+        return jsonify({"error":f"Parse failed: {e}"}), 500
+
+    # Save as season
+    uid = session.get("user_id") or 0
+    now = datetime.datetime.now().isoformat(timespec="seconds")
+    with get_db() as db:
+        cur = db.execute(
+            "INSERT INTO seasons (user_id, title, genre, bible, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+            (uid, bible.get("title","Untitled"), bible.get("genre",""), json.dumps(bible), now, now)
+        )
+        season_id = cur.lastrowid
+        db.commit()
+
+    bible["season_id"] = season_id
+    return jsonify(bible)
+
+
+@app.route("/generate-season-episode", methods=["POST"])
+@login_required
+def generate_season_episode():
+    tier = "admin" if session.get("is_admin") else session.get("tier","free")
+    if tier not in SEASON_TIERS:
+        return jsonify({"error":"Season mode requires Shadow Monarch or Admin."}), 403
+
+    # Quota check
+    if not session.get("is_admin"):
+        uid  = session.get("user_id")
+        user = get_user(uid)
+        if user:
+            used, limit, has_quota = quota_check(user)
+            if not has_quota:
+                return jsonify({"error":f"Quota reached ({used}/{limit}). Upgrade to generate more.","quota_exceeded":True}), 403
+
+    api_key = ANTHROPIC_API_KEY  # validated at module load
+
+    data      = request.json or {}
+    bible     = data.get("bible") or {}
+    ep_outline= data.get("episode_outline") or {}
+    ep_num    = ep_outline.get("episode_number", 1)
+    season_id = data.get("season_id")
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    series_context = (
+        f"Series: {bible.get('title','')} | Genre: {bible.get('genre','')} | "
+        f"World: {bible.get('world','')} | Main Conflict: {bible.get('main_conflict','')} | "
+        f"Characters: {', '.join(c.get('name','?') for c in bible.get('characters',[]))}"
+    )
+
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=12000,
+        extra_headers={"anthropic-beta": "output-128k-2025-02-19"},
+        system="You are a master anime writer. Always respond with valid JSON only — no markdown, no code blocks.",
+        messages=[{"role":"user","content":f"""Write Episode {ep_num} of this anime series.
+
+SERIES CONTEXT: {series_context}
+
+THIS EPISODE:
+Title: {ep_outline.get('title','')}
+Synopsis: {ep_outline.get('synopsis','')}
+Key Events: {', '.join(ep_outline.get('key_events',[]))}
+Character Focus: {ep_outline.get('character_focus','')}
+Tone: {ep_outline.get('tone','')}
+Cliffhanger: {ep_outline.get('cliffhanger','')}
+
+Return ONLY a JSON object:
+{{
+  "title": "Episode {ep_num}: {ep_outline.get('title','')}",
+  "episode_number": {ep_num},
+  "subtitle": "Japanese subtitle",
+  "genre": "{bible.get('genre','').replace('"', '')}",
+  "synopsis": "Episode synopsis",
+  "characters": {json.dumps(bible.get('characters',[]))},
+  "scenes": [
+    {{
+      "number": 1,
+      "title": "Scene Title",
+      "setting": "Where and when",
+      "mood": "tense/dramatic/epic/mysterious/peaceful",
+      "action": "3-4 vivid sentences describing what happens, respecting the series continuity",
+      "dialogue": [
+        {{"speaker":"Name","line":"Dialogue","emotion":"emotion"}}
+      ],
+      "image_prompt": "anime art, [detailed scene], Solo Leveling aesthetic, dark fantasy, cinematic, 4K"
+    }}
+  ]
+}}
+
+Create exactly 6 scenes. Keep it consistent with the series characters and world. End on the specified cliffhanger."""}]
+    )
+
+    try:
+        episode = json.loads(extract_json(response.content[0].text))
+    except json.JSONDecodeError as e:
+        return jsonify({"error":f"Parse failed: {e}"}), 500
+
+    # Save episode to DB — but only if the caller actually owns the season.
+    # Without this check, any logged-in user could pass another user's season_id and
+    # write into that user's season_episodes table (IDOR).
+    if season_id:
+        now = datetime.datetime.now().isoformat(timespec="seconds")
+        uid_save = session.get("user_id") or 0
+        with get_db() as db:
+            if session.get("is_admin"):
+                owned = db.execute("SELECT id FROM seasons WHERE id=?", (season_id,)).fetchone()
+            else:
+                owned = db.execute("SELECT id FROM seasons WHERE id=? AND user_id=?",
+                                   (season_id, uid_save)).fetchone()
+            if owned:
+                existing = db.execute(
+                    "SELECT id FROM season_episodes WHERE season_id=? AND episode_number=?",
+                    (season_id, ep_num)
+                ).fetchone()
+                if existing:
+                    db.execute("UPDATE season_episodes SET data=?, title=? WHERE id=?",
+                               (json.dumps(episode), episode.get("title",""), existing["id"]))
+                else:
+                    db.execute(
+                        "INSERT INTO season_episodes (season_id, episode_number, title, data, created_at) VALUES (?,?,?,?,?)",
+                        (season_id, ep_num, episode.get("title",""), json.dumps(episode), now)
+                    )
+                db.execute("UPDATE seasons SET updated_at=? WHERE id=?", (now, season_id))
+                db.commit()
+
+    # Count against quota
+    if not session.get("is_admin") and session.get("user_id"):
+        with get_db() as db:
+            db.execute("UPDATE users SET episodes_used=episodes_used+1 WHERE id=?",
+                       (session["user_id"],))
+            db.commit()
+
+    return jsonify(episode)
+
+
+@app.route("/load-season/<int:sid>")
+@login_required
+def load_season(sid):
+    uid = session.get("user_id") or 0
+    with get_db() as db:
+        if session.get("is_admin"):
+            season = db.execute("SELECT * FROM seasons WHERE id=?", (sid,)).fetchone()
+        else:
+            season = db.execute("SELECT * FROM seasons WHERE id=? AND user_id=?", (sid,uid)).fetchone()
+        if not season:
+            return jsonify({"error":"Not found"}), 404
+        episodes = db.execute(
+            "SELECT episode_number, title, data FROM season_episodes WHERE season_id=? ORDER BY episode_number",
+            (sid,)
+        ).fetchall()
+
+    bible = json.loads(season["bible"])
+    bible["season_id"] = sid
+    return jsonify({
+        "bible": bible,
+        "generated_episodes": {
+            str(e["episode_number"]): {"title":e["title"], "data":json.loads(e["data"])}
+            for e in episodes
+        }
+    })
+
+
+@app.route("/seasons")
+@login_required
+def list_seasons():
+    uid = session.get("user_id") or 0
+    with get_db() as db:
+        if session.get("is_admin"):
+            rows = db.execute("SELECT id,title,genre,created_at,updated_at FROM seasons ORDER BY updated_at DESC LIMIT 30").fetchall()
+        else:
+            rows = db.execute("SELECT id,title,genre,created_at,updated_at FROM seasons WHERE user_id=? ORDER BY updated_at DESC",(uid,)).fetchall()
+        # Count episodes per season
+        result = []
+        for r in rows:
+            count = db.execute("SELECT COUNT(*) as c FROM season_episodes WHERE season_id=?",(r["id"],)).fetchone()["c"]
+            d = dict(r); d["episodes_generated"] = count; result.append(d)
+    return jsonify(result)
+
+
+@app.route("/delete-season/<int:sid>", methods=["DELETE"])
+@login_required
+def delete_season(sid):
+    uid = session.get("user_id") or 0
+    with get_db() as db:
+        if session.get("is_admin"):
+            db.execute("DELETE FROM season_episodes WHERE season_id=?", (sid,))
+            db.execute("DELETE FROM seasons WHERE id=?", (sid,))
+        else:
+            owned = db.execute("SELECT id FROM seasons WHERE id=? AND user_id=?", (sid, uid)).fetchone()
+            if owned:
+                db.execute("DELETE FROM season_episodes WHERE season_id=?", (sid,))
+                db.execute("DELETE FROM seasons WHERE id=?", (sid,))
+        db.commit()
+    return jsonify({"success":True})
+
+
+# ── Neural TTS ────────────────────────────────────────────────────────────────
+
+VOICE_MAP = {
+    "narrator":    "en-US-GuyNeural",
+    "protagonist": "en-US-ChristopherNeural",
+    "antagonist":  "en-US-DavisNeural",
+    "female":      "en-US-JennyNeural",
+    "female_ant":  "en-US-NancyNeural",
+    "support_m1":  "en-US-EricNeural",
+    "support_m2":  "en-US-RogerNeural",
+    "support_f1":  "en-US-AriaNeural",
+    "support_f2":  "en-US-SaraNeural",
+}
+
+@app.route("/speak", methods=["POST"])
+@login_required
+def speak():
+    data  = request.json or {}
+    text  = (data.get("text") or "").strip()[:1000]
+    voice = (data.get("voice") or "en-US-GuyNeural").strip()[:80]
+    rate  = (data.get("rate") or "+0%").strip()[:8]
+    if not text:
+        return "", 400
+    # edge-tts voice ids are like "en-US-GuyNeural" — letters, digits, hyphens only.
+    # Reject anything else so we never proxy weird input to the upstream service.
+    if not re.fullmatch(r"[A-Za-z0-9\-]+", voice):
+        return jsonify({"error": "Invalid voice id."}), 400
+    # rate format: "+N%" or "-N%" where N is 0-200.
+    if not re.fullmatch(r"[+\-]\d{1,3}%", rate):
+        return jsonify({"error": "Invalid rate format. Use '+N%' or '-N%'."}), 400
+    try:
+        async def gen():
+            comm = edge_tts.Communicate(text, voice, rate=rate)
+            chunks = []
+            async for chunk in comm.stream():
+                if chunk["type"] == "audio":
+                    chunks.append(chunk["data"])
+            return b"".join(chunks)
+        # Use a fresh event loop per thread to avoid conflicts in Flask threaded mode
+        loop = asyncio.new_event_loop()
+        try:
+            audio = loop.run_until_complete(gen())
+        finally:
+            loop.close()
+        return Response(audio, mimetype="audio/mpeg",
+                        headers={"Cache-Control": "no-store"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── Story generation ───────────────────────────────────────────────────────────
+
+def build_prompt(concept, mode, style_key=DEFAULT_STYLE):
+    """
+    Builds the Claude system prompt for story generation.
+
+    - Anchors the structure on classic anime story shapes (kishōtenketsu for
+      episode, 3-act for short, hero's-journey for movie). The model needs an
+      explicit shape, otherwise it defaults to generic Western 3-act all the time.
+    - Threads the chosen art style's vibe into Claude's worldbuilding so the
+      dialogue and pacing actually match the visual look (Ghibli SHOULDN'T sound
+      like Berserk just because the artist picked Ghibli).
+    - Tells Claude to write a `character_anchor` for every character — a fixed
+      visual descriptor like "spiky white hair, scar on right cheek, black trench
+      coat with silver buckles". We re-inject this into every scene's image
+      prompt during export so the protagonist actually LOOKS like the same person
+      across all scenes. Without this, Pollinations/Seedream roll a new face every
+      scene and the result feels like a slideshow of strangers.
+    """
+    style = get_style(style_key)
+    style_name = style["name"]
+    style_vibe = style["vibe_hint"]
+
+    configs = {
+        "episode": (
+            5,
+            "single anime episode with a complete arc",
+            (
+                "5 scenes following kishōtenketsu: "
+                "Scene 1 KI (introduce world+protagonist), "
+                "Scene 2 SHŌ (escalate stakes), "
+                "Scene 3 TEN (a twist that reframes everything), "
+                "Scene 4 KETSU-A (confrontation), "
+                "Scene 5 KETSU-B (resolution + hook for next episode). "
+                "Each scene: 2-3 vivid sentences of action, 3-5 dialogue lines."
+            ),
+        ),
+        "short": (
+            15,
+            "anime short film (4 setup · 7 confrontation · 4 resolution)",
+            (
+                "15 scenes. Open with a cold-open hook (scene 1) before introducing the protagonist. "
+                "Each scene: 2 sentence action max, 2-3 dialogue lines max. "
+                "Scene 12 must be the lowest moment for the protagonist."
+            ),
+        ),
+        "movie": (
+            24,
+            "full anime feature film",
+            (
+                "24 scenes structured as: Act 1 (scenes 1-6: ordinary world, inciting incident, refusal, call accepted), "
+                "Act 2A (scenes 7-12: trials, allies, false victory), "
+                "Act 2B (scenes 13-18: the ordeal, dark night of the soul, revelation), "
+                "Act 3 (scenes 19-24: climax, sacrifice, transformation, return). "
+                "Scene 1 is a cold-open. Scene 12 is a false victory. Scene 18 is the lowest point. "
+                "Per scene: 2 sentence action, 2-3 dialogue lines."
+            ),
+        ),
+    }
+    count, structure, hint = configs.get(mode, configs["episode"])
+
+    return f"""Write an anime {structure} based on: "{concept}"
+
+ART STYLE: {style_name}
+TONE TO MATCH THE STYLE: {style_vibe}
+
+STRUCTURE: {hint}
+
+CHARACTER ANCHORS — CRITICAL:
+For each character, write a `character_anchor` field: a short, fixed visual descriptor
+(hair color/style, eye color, defining feature, signature outfit, age). Examples:
+  - "spiky white hair, golden eyes, scar across left cheek, black hooded trench coat, late teens"
+  - "long crimson braid, jade eyes, kimono with crane pattern, mid-20s"
+This anchor MUST be re-stated in every scene's `image_prompt` whenever that character appears,
+so the artwork shows the same face across scenes.
+
+Return ONLY valid JSON — no markdown, no code fences:
+{{
+  "title": "",
+  "subtitle": "Japanese subtitle in romaji",
+  "genre": "",
+  "synopsis": "2 sentences with a hook",
+  "characters": [
+    {{
+      "name": "",
+      "role": "Protagonist/Antagonist/Supporting",
+      "description": "personality + arc in 1-2 sentences",
+      "character_anchor": "fixed visual descriptor (see above)"
+    }}
+  ],
+  "scenes": [
+    {{
+      "number": 1,
+      "title": "",
+      "setting": "where and when (1 line)",
+      "mood": "one word: dramatic/tense/violent/epic/triumphant/sorrowful/melancholic/peaceful/mysterious/unsettling",
+      "action": "2-3 vivid sentences. Dark/mature themes welcome. Show, don't tell.",
+      "dialogue": [
+        {{"speaker": "Character Name", "line": "What they say", "emotion": "neutral/angry/grieving/excited/whispered/shouting/cold/desperate"}}
+      ],
+      "image_prompt": "anime art, [scene composition including any present character's anchor descriptors verbatim], [setting], [mood lighting]"
+    }}
+  ]
+}}
+
+Produce exactly {count} scenes. Maximise tension, moral complexity, and emotional depth.
+Every scene's image_prompt MUST include the character_anchor for any character that appears in it."""
+
+
+@app.route("/")
+@login_required
+def index():
+    user  = get_user(session["user_id"]) if session.get("user_id") else None
+    tier  = "admin" if session.get("is_admin") else (user["tier"] if user else "free")
+    if session.get("is_admin"):
+        used, limit = 0, 999
+    else:
+        used, limit, _ = quota_check(user) if user else (0, 2, True)
+    return render_template("index.html",
+                           is_admin=session.get("is_admin",False),
+                           email=session.get("email",""),
+                           tier=tier, used=used, limit=limit,
+                           paypal_client_id=PAYPAL_CLIENT_ID)
+
+
+@app.route("/generate", methods=["POST"])
+@login_required
+def generate():
+    if not session.get("is_admin"):
+        uid  = session.get("user_id")
+        user = get_user(uid) if uid else None
+        if not user:
+            return jsonify({"error":"Not logged in"}), 401
+        used, limit, has_quota = quota_check(user)
+        if not has_quota:
+            return jsonify({"error":f"Quota reached ({used}/{limit}). Upgrade for more.","quota_exceeded":True}), 403
+
+    api_key = ANTHROPIC_API_KEY  # validated at module load
+
+    data    = request.json or {}
+    concept = (data.get("concept") or "").strip()
+    mode    = data.get("mode","episode")
+    style_key = (data.get("style") or DEFAULT_STYLE).strip()
+    if style_key not in STYLES:
+        style_key = DEFAULT_STYLE
+
+    if mode not in ("episode","short","movie"):
+        return jsonify({"error":"Invalid mode. Use episode, short, or movie."}), 400
+    if not concept:
+        return jsonify({"error":"No concept provided"}), 400
+
+    # Server-side tier enforcement for mode
+    if not session.get("is_admin"):
+        uid2  = session.get("user_id")
+        user2 = get_user(uid2) if uid2 else None
+        tier2 = user2["tier"] if user2 else "free"
+        if mode not in TIER_MODES.get(tier2, {"episode"}):
+            return jsonify({"error":f"Your plan does not include {mode} mode. Upgrade to unlock.","quota_exceeded":True}), 403
+
+    client   = anthropic.Anthropic(api_key=api_key)
+    max_toks = {"episode": 4000, "short": 16000, "movie": 32000}.get(mode, 4000)
+
+    # Monarch and Admin get the stronger reasoning model — opus produces noticeably
+    # better dramatic structure and dialogue subtext on longer pieces. Sonnet stays
+    # default for Free/Hunter (faster + cheaper, fine for episode mode).
+    tier_now = "admin" if session.get("is_admin") else session.get("tier", "free")
+    story_model = "claude-opus-4-7" if (tier_now in ("monarch", "admin") and mode in ("short", "movie")) else "claude-sonnet-4-6"
+
+    create_kwargs = dict(
+        model=story_model,
+        max_tokens=max_toks,
+        system="You are a master anime writer and director. Always respond with valid JSON only — no markdown, no code blocks.",
+        messages=[{"role": "user", "content": build_prompt(concept, mode, style_key)}],
+    )
+    # Extended output beta — allows up to 128K output tokens (needed for short/movie)
+    if mode in ("short", "movie"):
+        create_kwargs["extra_headers"] = {"anthropic-beta": "output-128k-2025-02-19"}
+
+    response = client.messages.create(**create_kwargs)
+
+    try:
+        story = json.loads(extract_json(response.content[0].text))
+    except json.JSONDecodeError as e:
+        return jsonify({"error":f"Story parse failed: {e}"}), 500
+
+    # Stamp the style onto the story so re-opening from the library
+    # or exporting later uses the same visual treatment.
+    story["style"] = style_key
+
+    if not session.get("is_admin") and session.get("user_id"):
+        with get_db() as db:
+            db.execute("UPDATE users SET episodes_used=episodes_used+1 WHERE id=?",
+                       (session["user_id"],))
+            db.commit()
+
+    return jsonify(story)
+
+
+@app.route("/styles")
+def styles_list():
+    """Public list for the frontend style picker. No auth required —
+    style metadata is not sensitive and the home page reads this."""
+    return jsonify({"styles": styles_public(), "default": DEFAULT_STYLE})
+
+
+# ── Video export ───────────────────────────────────────────────────────────────
+
+MIN_DUR = {"episode":15,"short":30,"movie":90}
+ANIM_CLIP_DUR = 5   # seconds per scene clip
+
+
+def _build_scene_image_prompt(scene, characters_by_name, style_suffix):
+    """
+    Compose the final image prompt for a scene by:
+      1) Starting from Claude's scene.image_prompt
+      2) Re-injecting the character_anchor for every character that speaks or
+         is named in this scene's dialogue/setting. This is the single biggest
+         lever for visual consistency — without it, every Pollinations call rolls
+         a fresh face for the protagonist.
+      3) Appending the chosen art style's suffix.
+
+    Why we re-inject instead of trusting Claude to do it: Claude does include
+    anchors when prompted, but it abbreviates in later scenes ("the hunter" instead
+    of the full visual descriptor) which loses anchor signal at the image model.
+    Re-injecting verbatim is cheap and dramatically improves cross-scene continuity.
+    """
+    base = scene.get("image_prompt") or f"anime, {scene.get('setting','')}"
+
+    anchors_to_add = []
+    if characters_by_name:
+        dlg = scene.get("dialogue") or []
+        speakers = {(d.get("speaker") or "").strip() for d in dlg}
+        for name, anchor in characters_by_name.items():
+            if not anchor:
+                continue
+            if name in speakers or (name and name in base):
+                # Only inject if the anchor isn't already substantially present
+                if anchor[:30] not in base:
+                    anchors_to_add.append(f"{name}: {anchor}")
+
+    parts = [base]
+    if anchors_to_add:
+        parts.append("featuring " + "; ".join(anchors_to_add))
+    parts.append(style_suffix)
+    return ", ".join(parts)
+
+
+def _get_ffmpeg():
+    """Return path to the bundled ffmpeg binary."""
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
+
+def animate_scene_local(img_path, scene, tmp_dir, scene_idx, job):
+    """
+    Cinematic anime-style animation via FFmpeg zoompan.
+    Sharp & clean — no AI waviness. Mood-driven camera + color grade.
+    24fps · 5 sec · ~2 MB per clip · renders in 3-8 seconds.
+    """
+    ffmpeg   = _get_ffmpeg()
+    mood     = (scene.get("mood") or "dramatic").lower() if isinstance(scene, dict) else "dramatic"
+    out_path = os.path.join(tmp_dir, f"anim_{scene_idx}.mp4")
+    fps, dur = 24, 5
+    nf       = fps * dur           # 120 frames
+    W, H     = 1920, 1080
+    PW, PH   = 2560, 1440          # overscan canvas (room to zoom)
+
+    # Center-crop helpers (FFmpeg expression vars: iw/ih=input dims, zoom=current zoom)
+    CTR  = f"x=(iw-iw/zoom)/2:y=(ih-ih/zoom)/2"
+    PANR = f"x=min(iw*(1-1/zoom)\\,on*1.1):y=(ih-ih/zoom)/2"   # pan right
+    PANL = f"x=max(0\\,iw*(1-1/zoom)-on*1.1):y=(ih-ih/zoom)/2"  # pan left
+
+    # Note: commas inside min()/max() must be escaped as \, in FFmpeg filter strings
+    MOTIONS = {
+        "dramatic":   f"z=min(zoom+0.002\\,1.3):{CTR}:d={nf}:s={W}x{H}",
+        "tense":      f"z=min(zoom+0.0025\\,1.35):{CTR}:d={nf}:s={W}x{H}",
+        "violent":    f"z=min(zoom+0.003\\,1.4):{CTR}:d={nf}:s={W}x{H}",
+        "epic":       f"z=if(lte(on\\,1)\\,1.3\\,max(1.0\\,zoom-0.002)):{CTR}:d={nf}:s={W}x{H}",
+        "triumphant": f"z=if(lte(on\\,1)\\,1.25\\,max(1.0\\,zoom-0.0018)):{CTR}:d={nf}:s={W}x{H}",
+        "sorrowful":  f"z=1.12:{PANR}:d={nf}:s={W}x{H}",
+        "melancholic":f"z=1.1:{PANR}:d={nf}:s={W}x{H}",
+        "peaceful":   f"z=1.1:{PANL}:d={nf}:s={W}x{H}",
+        "mysterious": f"z=min(zoom+0.001\\,1.15):{CTR}:d={nf}:s={W}x{H}",
+        "unsettling": f"z=min(zoom+0.002\\,1.28):{CTR}:d={nf}:s={W}x{H}",
+        "seductive":  f"z=1.1:{PANL}:d={nf}:s={W}x{H}",
+    }
+    zm = MOTIONS.get(mood, MOTIONS["dramatic"])
+
+    # eq filter: contrast / saturation / brightness  (no hue filter — not in essentials build)
+    GRADES = {
+        "dramatic":   "eq=contrast=1.28:saturation=0.82",
+        "tense":      "eq=contrast=1.35:saturation=0.65:brightness=-0.05",
+        "violent":    "eq=contrast=1.45:saturation=0.55:brightness=-0.08",
+        "epic":       "eq=contrast=1.22:saturation=1.35:brightness=0.06",
+        "triumphant": "eq=contrast=1.18:saturation=1.45:brightness=0.08",
+        "sorrowful":  "eq=contrast=1.12:saturation=0.35:brightness=-0.12",
+        "melancholic":"eq=contrast=1.10:saturation=0.40:brightness=-0.10",
+        "peaceful":   "eq=contrast=1.05:saturation=1.15:brightness=0.04",
+        "mysterious": "eq=contrast=1.25:saturation=0.55:brightness=-0.07",
+        "unsettling": "eq=contrast=1.30:saturation=0.50:brightness=-0.08",
+        "seductive":  "eq=contrast=1.20:saturation=1.20:brightness=0.02",
+    }
+    grade = GRADES.get(mood, GRADES["dramatic"])
+
+    vf = f"scale={PW}:{PH},zoompan={zm},{grade},format=yuv420p"
+    job["message"] = f"Scene {scene_idx+1} — cinematic motion ({mood})…"
+
+    try:
+        res = subprocess.run(
+            [ffmpeg, "-y", "-loop", "1", "-i", img_path,
+             "-vf", vf, "-r", str(fps), "-t", str(dur),
+             "-c:v", "libx264", "-preset", "fast", "-crf", "17", "-an",
+             out_path],
+            capture_output=True, timeout=120,
+        )
+        if res.returncode == 0 and os.path.exists(out_path):
+            job["elapsed_seconds"] = int(time.time() - job["start_time"])
+            return out_path
+    except Exception:
+        pass
+    return None
+
+
+def animate_scene_fal(img_path, prompt, tmp_dir, scene_idx, job, model="wan"):
+    """
+    Animates a scene using fal.ai.
+
+    Models (chosen by cost/quality tradeoff):
+      - "wan"  -> fal-ai/wan-25-preview/image-to-video at 480p
+                  ~$0.05/sec × 5s = $0.25/clip. Default for Hunter tier.
+                  Solid anime motion, fast turnaround.
+      - "kling"-> fal-ai/kling-video/v1.6/pro/image-to-video
+                  ~$0.07/sec × 5s = $0.35/clip. Premium / Monarch tier.
+                  Stronger camera choreography and consistency.
+
+    Why two tiers: an animated movie has 24 clips. At Kling pricing a single
+    movie export costs ~$8.40 in fal calls; at Wan pricing it's ~$6.00. We
+    default to the cheaper model and only fall back to Kling on Wan failure.
+    """
+    if not FAL_KEY:
+        return None
+
+    import fal_client
+
+    clean_prompt = prompt[:400].split(",")[0] + ", fluid anime motion, cinematic camera"
+
+    try:
+        job["message"] = f"Scene {scene_idx+1} — uploading to fal.ai…"
+        fal_img_url = fal_client.upload_file(img_path)
+
+        if model == "kling":
+            endpoint = "fal-ai/kling-video/v1.6/pro/image-to-video"
+            args = {
+                "image_url":    fal_img_url,
+                "prompt":       clean_prompt,
+                "duration":     str(ANIM_CLIP_DUR),
+                "aspect_ratio": "16:9",
+            }
+            job["message"] = f"Scene {scene_idx+1} — animating with Kling Pro…"
+        else:
+            # Wan 2.5 — default; cheaper and tuned well for anime stills.
+            # 480p keeps cost down; viewers won't notice on a 5-sec clip
+            # composited into a 1080p timeline.
+            endpoint = "fal-ai/wan-25-preview/image-to-video"
+            args = {
+                "image_url":  fal_img_url,
+                "prompt":     clean_prompt,
+                "resolution": "480p",
+                "duration":   str(ANIM_CLIP_DUR),
+            }
+            job["message"] = f"Scene {scene_idx+1} — animating with Wan 2.5…"
+
+        # subscribe() blocks until complete and handles all polling internally
+        result = fal_client.subscribe(endpoint, arguments=args, with_logs=False)
+
+        # Response shape varies; both Wan and Kling return {"video": {"url": ...}}
+        vid_url = (result.get("video") or {}).get("url")
+        if not vid_url:
+            vids    = result.get("videos") or []
+            vid_url = vids[0].get("url") if vids else None
+
+        if not vid_url:
+            return None
+
+        job["message"] = f"Scene {scene_idx+1} — downloading clip…"
+        vid_bytes = http.get(vid_url, timeout=120).content
+        out_path  = os.path.join(tmp_dir, f"anim_{scene_idx}.mp4")
+        with open(out_path, "wb") as fh:
+            fh.write(vid_bytes)
+
+        job["elapsed_seconds"] = int(time.time() - job["start_time"])
+        return out_path
+
+    except Exception:
+        return None
+
+
+def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEFAULT_STYLE, anim_model="wan"):
+    job = export_jobs[job_id]
+    job["start_time"] = time.time()
+    tmp = tempfile.mkdtemp(prefix="animeforge_")
+    try:
+        from moviepy import ImageClip, AudioFileClip, concatenate_videoclips
+        import moviepy
+        from PIL import Image
+        from gtts import gTTS
+
+        scenes  = story.get("scenes", [])
+        n       = len(scenes)
+        min_dur = MIN_DUR.get(mode, 20)
+        clips   = []
+
+        # Resolve style suffix and build the character anchor map once for the run
+        style_meta   = get_style(style_key)
+        style_suffix = style_meta["image_suffix"]
+        characters_by_name = {}
+        for c in (story.get("characters") or []):
+            name = (c.get("name") or "").strip()
+            anchor = (c.get("character_anchor") or "").strip()
+            if name and anchor:
+                characters_by_name[name] = anchor
+
+        W, H = (3840, 2160) if quality == "4k" else (1920, 1080)
+        job["scenes_total"] = n
+        # Use a stable per-export seed so re-runs of the same story produce the same characters
+        run_seed = abs(hash((story.get("title",""), style_key))) % 100000
+
+        for i, sc in enumerate(scenes):
+            job["progress"]            = int(10 + 75 * i / n)
+            job["scenes_done"]         = i
+            job["current_scene_title"] = sc.get("title", "")
+
+            elapsed = time.time() - job["start_time"]
+            job["elapsed_seconds"] = int(elapsed)
+            if i > 0:
+                job["eta_seconds"] = int(elapsed / i * (n - i))
+
+            # ── Step 1: Generate scene image (live preview shown here) ──
+            job["message"] = f"Scene {i+1}/{n} — generating art…"
+            img_path = os.path.join(tmp, f"img_{i}.jpg")
+            raw_prompt = _build_scene_image_prompt(sc, characters_by_name, style_suffix)
+            prompt   = quote(raw_prompt)
+            # Stable per-scene seed bound to the run seed → same characters across rerolls
+            seed = run_seed + i * 17 + 3
+            img_url  = (f"https://image.pollinations.ai/prompt/{prompt}"
+                        f"?width={W}&height={H}&seed={seed}&nologo=true&enhance=true&model=flux")
+            try:
+                r = http.get(img_url, timeout=90)
+                with open(img_path, "wb") as f: f.write(r.content)
+                img = Image.open(img_path).convert("RGB").resize((W, H), Image.LANCZOS)
+                img.save(img_path, "JPEG", quality=90)
+                # Stream 320×180 thumbnail to browser (live preview — step 2 visible to user)
+                thumb = img.copy()
+                thumb.thumbnail((320, 180))
+                buf = io.BytesIO()
+                thumb.save(buf, "JPEG", quality=60)
+                job["current_img_b64"] = ("data:image/jpeg;base64,"
+                                          + base64.b64encode(buf.getvalue()).decode())
+            except Exception:
+                Image.new("RGB", (W, H), (5, 10, 25)).save(img_path, "JPEG")
+
+            # ── Step 2: Animate ──
+            # Two animation paths now:
+            #   anim_model="local"  → FFmpeg cinematic zoompan (free, mood-driven)
+            #   anim_model="wan"    → fal.ai Wan 2.5 (cheap, ~$0.25/clip)
+            #   anim_model="kling"  → fal.ai Kling 1.6 Pro (premium, ~$0.35/clip)
+            # Tier gating happens in /start-export; here we just honor what was sent.
+            vid_path = None
+            if animate:
+                if anim_model in ("wan", "kling") and FAL_KEY:
+                    vid_path = animate_scene_fal(img_path, raw_prompt, tmp, i, job, model=anim_model)
+                    # If the paid model fails, fall back to free local motion rather than fail the whole export
+                    if not vid_path:
+                        vid_path = animate_scene_local(img_path, sc, tmp, i, job)
+                else:
+                    vid_path = animate_scene_local(img_path, sc, tmp, i, job)
+                if vid_path:
+                    job["message"] = f"Scene {i+1}/{n} — animation done ✓"
+                else:
+                    job["message"] = f"Scene {i+1}/{n} — animation unavailable, using image"
+
+            # ── Step 3: Build TTS audio ──
+            audio_path = os.path.join(tmp, f"audio_{i}.mp3")
+            tts_parts  = [f"{sc.get('title','')}. {sc.get('action','')}"]
+            for line in sc.get("dialogue", []):
+                tts_parts.append(f"{line.get('speaker','')}: {line.get('line','')}")
+            try:
+                gTTS(" ".join(tts_parts), lang="en").save(audio_path)
+                audio    = AudioFileClip(audio_path)
+                duration = max(audio.duration + 3, min_dur)
+            except Exception:
+                audio = None; duration = min_dur
+
+            # ── Build clip: animated video or static image ──
+            if vid_path:
+                from moviepy import VideoFileClip
+                clip = VideoFileClip(vid_path)
+                # Attach TTS audio on top of any existing audio track
+                if audio:
+                    audio_trimmed = audio.subclipped(0, min(audio.duration, clip.duration))
+                    clip = clip.with_audio(audio_trimmed)
+            else:
+                clip = ImageClip(img_path, duration=duration)
+                if audio:
+                    audio = audio.with_effects([moviepy.afx.AudioFadeIn(0.5), moviepy.afx.AudioFadeOut(1.0)])
+                    clip  = clip.with_audio(audio)
+            clips.append(clip)
+
+        job["progress"]    = 88
+        anim_tag = "_animated" if animate else ""
+        job["message"]     = f"Rendering final {quality.upper()} 30fps{' animated' if animate else ''} video…"
+        job["scenes_done"] = n
+        final    = concatenate_videoclips(clips, method="compose")
+        safe     = "".join(c for c in story.get("title", "anime") if c.isalnum() or c in " _-")[:40]
+        out_name = f"{safe.strip()}_{quality}{anim_tag}_30fps.mp4"
+        out_path = os.path.join(tmp, out_name)
+
+        encode_done = threading.Event()
+        _msgs = [
+            f"Encoding {quality.upper()} frames at 30fps…",
+            "Compressing with H.264…",
+            "Writing audio tracks…",
+            "Merging scenes…",
+            "Almost there — hang tight…",
+        ]
+
+        def _progress_ticker():
+            job["progress"] = 92
+            idx = 0
+            while not encode_done.is_set():
+                job["elapsed_seconds"] = int(time.time() - job["start_time"])
+                job["message"] = _msgs[idx % len(_msgs)]
+                idx += 1
+                time.sleep(2.5)
+
+        ticker = threading.Thread(target=_progress_ticker, daemon=True)
+        ticker.start()
+
+        try:
+            final.write_videofile(out_path, fps=30, codec="libx264", audio_codec="aac",
+                                  threads=4, preset="ultrafast", logger=None)
+        finally:
+            encode_done.set()
+            ticker.join(timeout=2)
+
+        final.close()
+        for c in clips:
+            try: c.close()
+            except Exception: pass
+
+        elapsed = time.time() - job["start_time"]
+        job.update({
+            "file_path": out_path, "file_name": out_name, "status": "complete",
+            "progress": 100, "message": f"Your {quality.upper()} 30fps video is ready!",
+            "tmp_dir": tmp, "elapsed_seconds": int(elapsed), "eta_seconds": 0,
+        })
+    except Exception as e:
+        job.update({"status": "error", "message": str(e), "error": str(e)})
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@app.route("/start-export", methods=["POST"])
+@login_required
+def start_export():
+    tier = "admin" if session.get("is_admin") else session.get("tier", "free")
+    if tier == "free":
+        return jsonify({"error": "Video export requires Hunter or Monarch plan."}), 403
+    data    = request.json or {}
+    story   = data.get("story")
+    mode    = data.get("mode", "episode")
+    quality = data.get("quality", "1080p")
+    animate = bool(data.get("animate", False))
+    style_key  = (data.get("style") or DEFAULT_STYLE).strip()
+    if style_key not in STYLES:
+        style_key = DEFAULT_STYLE
+    # Animation model selection. "local" is free (FFmpeg zoompan), "wan" is the
+    # default paid option (~$0.25/clip, Hunter+), "kling" is premium (~$0.35/clip,
+    # Monarch+ only). We default to "local" so a Hunter who clicks Animate without
+    # picking a model still gets *something* without surprise fal.ai charges.
+    anim_model = (data.get("anim_model") or "local").strip()
+    if anim_model not in ("local", "wan", "kling"):
+        anim_model = "local"
+    # Tier-gate the premium paid models
+    if anim_model == "kling" and tier not in ("monarch", "admin"):
+        anim_model = "wan"
+    if anim_model in ("wan", "kling") and not FAL_KEY:
+        anim_model = "local"   # no key → free fallback
+    if quality == "4k" and tier not in ("monarch", "admin"):
+        quality = "1080p"
+    if animate and not FAL_KEY and anim_model != "local":
+        # Animate requested with paid model but no FAL key — degrade gracefully
+        anim_model = "local"
+    if not story or not story.get("scenes"):
+        return jsonify({"error": "No story provided"}), 400
+    job_id = secrets.token_urlsafe(16)
+    export_jobs[job_id] = {
+        "status": "running", "progress": 5, "message": "Starting...",
+        "file_path": None, "file_name": None, "error": None, "tmp_dir": None,
+        "start_time": time.time(), "scenes_total": len(story.get("scenes", [])),
+        "scenes_done": 0, "eta_seconds": None, "elapsed_seconds": 0,
+        "current_img_b64": None, "current_scene_title": "", "quality": quality,
+        "animate": animate, "style": style_key, "anim_model": anim_model,
+    }
+    threading.Thread(
+        target=do_export,
+        args=(job_id, story, mode, quality, animate, style_key, anim_model),
+        daemon=True,
+    ).start()
+    return jsonify({"job_id": job_id, "quality": quality, "animate": animate,
+                    "style": style_key, "anim_model": anim_model})
+
+
+@app.route("/export-status/<job_id>")
+@login_required
+def export_status(job_id):
+    def stream():
+        while True:
+            job = export_jobs.get(job_id,{"status":"not_found"})
+            yield f"data: {json.dumps(job)}\n\n"
+            if job["status"] in ("complete","error","not_found"): break
+            time.sleep(1.5)
+    return Response(stream(), mimetype="text/event-stream",
+                    headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
+
+
+@app.route("/download/<job_id>")
+@login_required
+def download(job_id):
+    job = export_jobs.get(job_id)
+    if job and job.get("status")=="complete" and job.get("file_path"):
+        tmp_dir = job.get("tmp_dir")
+        @after_this_request
+        def cleanup(response):
+            try:
+                if tmp_dir:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                export_jobs.pop(job_id, None)
+            except Exception:
+                pass
+            return response
+        return send_file(job["file_path"], as_attachment=True,
+                         download_name=job.get("file_name","anime.mp4"), mimetype="video/mp4")
+    return "File not ready.", 404
+
+
+# ── Admin panel ────────────────────────────────────────────────────────────────
+
+def admin_required(f):
+    @functools.wraps(f)
+    def w(*a, **kw):
+        if not session.get("is_admin"):
+            return redirect(url_for("login"))
+        return f(*a, **kw)
+    return w
+
+
+@app.route("/admin")
+@admin_required
+def admin_panel():
+    with get_db() as db:
+        users = db.execute(
+            "SELECT id, email, tier, episodes_used, period_month, paypal_subscription_id, created_at "
+            "FROM users ORDER BY created_at DESC"
+        ).fetchall()
+        stats = {
+            "total":   db.execute("SELECT COUNT(*) FROM users").fetchone()[0],
+            "free":    db.execute("SELECT COUNT(*) FROM users WHERE tier='free'").fetchone()[0],
+            "hunter":  db.execute("SELECT COUNT(*) FROM users WHERE tier='hunter'").fetchone()[0],
+            "monarch": db.execute("SELECT COUNT(*) FROM users WHERE tier='monarch'").fetchone()[0],
+            "projects": db.execute("SELECT COUNT(*) FROM projects").fetchone()[0],
+            "seasons":  db.execute("SELECT COUNT(*) FROM seasons").fetchone()[0],
+        }
+    pp_ok   = bool(PAYPAL_CLIENT_ID and PAYPAL_SECRET and PAYPAL_PLAN_HUNTER and PAYPAL_PLAN_MONARCH)
+    pika_ok = bool(FAL_KEY)
+    return render_template("admin.html",
+                           users=[dict(u) for u in users],
+                           stats=stats,
+                           pp_ok=pp_ok,
+                           pp_mode=PAYPAL_MODE,
+                           pika_ok=pika_ok,
+                           email=session.get("email", ""))
+
+
+@app.route("/admin/set-tier", methods=["POST"])
+@admin_required
+def admin_set_tier():
+    data = request.json or {}
+    uid  = data.get("user_id")
+    tier = data.get("tier")
+    if not uid or tier not in ("free", "hunter", "monarch"):
+        return jsonify({"error": "Invalid input"}), 400
+    with get_db() as db:
+        db.execute("UPDATE users SET tier=? WHERE id=?", (tier, uid))
+        db.commit()
+    return jsonify({"success": True})
+
+
+@app.route("/admin/delete-user/<int:uid>", methods=["DELETE"])
+@admin_required
+def admin_delete_user(uid):
+    with get_db() as db:
+        db.execute("DELETE FROM projects WHERE user_id=?", (uid,))
+        db.execute("DELETE FROM seasons WHERE user_id=?", (uid,))
+        db.execute("DELETE FROM users WHERE id=?", (uid,))
+        db.commit()
+    return jsonify({"success": True})
+
+
+# Schema bootstrap. Runs at module import so it works under both `python app.py`
+# (local dev) and `gunicorn app:app` (Render / Fly / any WSGI host) — gunicorn never
+# triggers __main__ so we can't rely on it. init_db is idempotent (CREATE TABLE IF
+# NOT EXISTS) so re-running is safe.
+init_db()
+
+
+if __name__ == "__main__":
+    # Flask's `debug=True` enables the Werkzeug debugger, which gives anyone hitting
+    # an error page a Python shell on the server (RCE). Opt-in via env var only —
+    # never hard-coded so a pasted-into-prod app.py can't accidentally expose it.
+    debug_enabled = os.environ.get("FLASK_DEBUG", "0") == "1"
+    # Honor $PORT in case someone runs `python app.py` on a managed host;
+    # defaults to 5000 for local dev.
+    port = int(os.environ.get("PORT", "5000"))
+    app.run(debug=debug_enabled, host="0.0.0.0", port=port, threaded=True)

@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AnimeForge — Login</title>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Noto+Sans+JP:wght@300;400&display=swap" rel="stylesheet">
+  <style>
+    :root { --red:#ff2244; --orange:#ff6a00; --dark:#0e0205; --border:rgba(255,40,70,.22); }
+    *{ margin:0; padding:0; box-sizing:border-box; }
+    body{
+      background:var(--dark); color:#fff;
+      font-family:'Noto Sans JP',sans-serif;
+      min-height:100vh; display:flex; align-items:center; justify-content:center;
+      padding:20px;
+    }
+    body::before{
+      content:''; position:fixed; inset:0;
+      background:radial-gradient(ellipse at 50% 40%,rgba(200,20,40,.12) 0%,transparent 60%),
+                 radial-gradient(ellipse at 10% 80%,rgba(255,80,0,.1) 0%,transparent 50%),
+                 radial-gradient(ellipse at 90% 10%,rgba(180,0,30,.08) 0%,transparent 45%);
+      pointer-events:none;
+      animation:bgPulse 6s ease-in-out infinite alternate;
+    }
+    @keyframes bgPulse{ to{ filter:brightness(1.1); } }
+    .box{
+      width:100%; max-width:420px;
+      background:rgba(20,2,5,.75);
+      border:1px solid var(--border);
+      border-radius:16px; padding:40px;
+      backdrop-filter:blur(24px);
+      box-shadow:0 0 80px rgba(200,20,40,.14);
+      position:relative; z-index:1;
+    }
+    .logo{
+      font-family:'Orbitron',sans-serif;
+      font-size:1.5rem; font-weight:900;
+      background:linear-gradient(135deg,#fff 0%,var(--red) 55%,var(--orange) 100%);
+      -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+      background-clip:text; text-align:center; margin-bottom:6px;
+      animation:logoFlicker 3s ease-in-out infinite alternate;
+    }
+    @keyframes logoFlicker{ from{filter:drop-shadow(0 0 6px rgba(255,40,60,.5))} to{filter:drop-shadow(0 0 22px rgba(255,40,60,.9)) drop-shadow(0 0 50px rgba(255,100,0,.4))} }
+    .logo-sub{ font-size:.7rem; color:rgba(255,50,80,.45); text-align:center; letter-spacing:.5em; margin-bottom:32px; }
+    label{ display:block; font-size:.75rem; color:rgba(255,60,80,.85); letter-spacing:.15em; text-transform:uppercase; margin-bottom:6px; }
+    input{
+      width:100%; background:rgba(0,0,0,.55);
+      border:1px solid rgba(255,40,60,.18);
+      border-radius:8px; color:#fff;
+      font-family:'Noto Sans JP',sans-serif;
+      font-size:.95rem; padding:12px 14px;
+      outline:none; transition:border-color .3s, box-shadow .3s;
+      margin-bottom:20px;
+    }
+    input:focus{ border-color:var(--red); box-shadow:0 0 16px rgba(255,30,60,.22); }
+    .btn{
+      width:100%; padding:14px;
+      background:linear-gradient(90deg,#8b0000,var(--red),var(--orange));
+      background-size:200%; animation:btnFire 4s linear infinite;
+      border:none; border-radius:8px; color:#fff;
+      font-family:'Orbitron',sans-serif; font-size:.85rem;
+      font-weight:700; letter-spacing:.18em; cursor:pointer;
+      transition:transform .2s, box-shadow .2s;
+    }
+    @keyframes btnFire{ 0%,100%{background-position:0%} 50%{background-position:100%} }
+    .btn:hover{ transform:translateY(-2px); box-shadow:0 8px 30px rgba(255,40,60,.4); }
+    .alt{ text-align:center; margin-top:18px; font-size:.82rem; color:rgba(255,255,255,.4); }
+    .alt a{ color:var(--red); text-decoration:none; }
+    .alt a:hover{ text-decoration:underline; color:var(--orange); }
+    .flash{
+      background:rgba(255,80,80,.1); border:1px solid rgba(255,80,80,.3);
+      border-radius:8px; padding:10px 14px;
+      color:#ff6666; font-size:.82rem; margin-bottom:18px;
+    }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <div class="logo">ANIMEFORGE</div>
+    <div class="logo-sub">アニメ創造エンジン</div>
+    <p style="font-size:.78rem;color:rgba(255,255,255,.42);text-align:center;line-height:1.6;margin-bottom:26px;padding:0 4px;">
+      Type any concept — get a full anime episode with scenes,<br>
+      dialogue, cinematic artwork, and voiceovers. Instantly.
+    </p>
+
+    {% with msgs = get_flashed_messages() %}
+      {% if msgs %}
+        <div class="flash">{{ msgs[0] }}</div>
+      {% endif %}
+    {% endwith %}
+
+    <form method="post">
+      <label>Email / Username</label>
+      <input type="text" name="email" autocomplete="username" required>
+      <label>Password</label>
+      <input type="password" name="password" autocomplete="current-password" required>
+      <button class="btn" type="submit">ENTER THE GATE</button>
+    </form>
+
+    <div class="alt">
+      No account? <a href="/register">Register here</a>
+    </div>
+  </div>
+</body>
+</html>
