@@ -1,14 +1,16 @@
 # Render.com one-click deploy config. To use:
-#   1. Push this folder to a GitHub repo (private is fine)
+#   1. Push this folder to a GitHub repo
 #   2. On Render: New + → Blueprint → connect the repo → Render reads this file
 #
 # Free tier: $0/mo. Sleeps after 15 min idle, first request after sleep takes
 # ~30 sec cold start. 750 hours/mo of uptime (enough for one app 24/7).
 #
-# Persistent disk (`disk:` below) is $1/mo per 1GB and keeps users.db alive
-# across deploys/restarts. Without it, every redeploy wipes user accounts.
-# If you're just validating, you can comment out the `disk:` block to stay
-# fully free — just know SQLite resets on restart.
+# About users.db on free tier: SQLite lives on the container's local filesystem.
+# It survives sleep/wake cycles but IS WIPED on every redeploy (every git push,
+# every env-var change). Acceptable for launch/validation. To make users.db
+# persistent across deploys, upgrade to the $7/mo Starter plan and add a
+# `disk:` block (Render rejects disks on free tier — that's why this file
+# doesn't have one).
 
 services:
   - type: web
@@ -20,14 +22,7 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app --workers 1 --threads 8 --timeout 0 --bind 0.0.0.0:$PORT
     healthCheckPath: /login
-    # Persistent disk so users.db survives restarts. Comment out to stay 100% free.
-    disk:
-      name: animeforge-data
-      mountPath: /var/data
-      sizeGB: 1
     envVars:
-      - key: ANIMEFORGE_DB_PATH
-        value: /var/data/users.db
       - key: PYTHON_VERSION
         value: 3.12.7
       - key: PAYPAL_MODE
