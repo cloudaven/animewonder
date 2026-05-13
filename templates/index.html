@@ -116,26 +116,79 @@
     .mode-btn.active .mode-desc { color:rgba(200,230,255,.6); }
     .mode-lock { font-size:.48rem; color:var(--gold); letter-spacing:.06em; }
 
-    /* ─── STYLE PICKER ────────────────────────────────────────────────── */
-    .style-row { display:flex; gap:7px; overflow-x:auto; padding:2px 1px 6px; -webkit-overflow-scrolling:touch;
-                 scrollbar-width:thin; scrollbar-color:rgba(0,170,255,.3) transparent; }
-    .style-row::-webkit-scrollbar { height:3px; }
-    .style-row::-webkit-scrollbar-thumb { background:rgba(0,170,255,.35); border-radius:3px; }
-    .style-pill {
-      flex-shrink:0; background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.1);
-      border-radius:8px; padding:8px 11px; cursor:pointer; transition:all .2s;
-      display:flex; align-items:center; gap:8px; min-width:0;
+    /* ─── ANIME VISUAL MODES PICKER ───────────────────────────────────── */
+    /* Inspired by the React reference Justen pasted — vertical card stack,
+       each card carries its own glow color via CSS vars set by JS on setStyle. */
+    .modes-wrap {
+      display:grid; gap:8px; padding:6px;
+      grid-template-columns:repeat(auto-fill,minmax(160px,1fr));
     }
-    .style-pill:hover { background:rgba(0,170,255,.1); border-color:rgba(0,170,255,.35); }
-    .style-pill.active { background:rgba(0,170,255,.16); border-color:var(--blue); box-shadow:0 0 12px rgba(0,170,255,.25); }
-    .style-badge {
-      font-family:'Orbitron',sans-serif; font-size:.5rem; letter-spacing:.1em;
-      background:rgba(102,0,255,.18); border:1px solid rgba(102,0,255,.35); border-radius:3px;
-      padding:2px 5px; color:#fff; line-height:1;
+    .mode-card {
+      background:rgba(0,0,0,.45); border:1px solid rgba(255,255,255,.10);
+      border-radius:14px; padding:11px 12px; cursor:pointer; transition:all .25s;
+      display:flex; align-items:center; gap:10px; backdrop-filter:blur(8px);
     }
-    .style-pill.active .style-badge { background:rgba(0,170,255,.25); border-color:var(--blue); }
-    .style-name { font-size:.72rem; color:rgba(255,255,255,.7); white-space:nowrap; }
-    .style-pill.active .style-name { color:#fff; }
+    .mode-card:hover { background:rgba(255,255,255,.06); border-color:rgba(255,255,255,.22); transform:translateY(-1px); }
+    .mode-card.active {
+      background:rgba(255,255,255,.1);
+      border-color:var(--theme-border,rgba(255,255,255,.4));
+      box-shadow:0 0 18px var(--theme-border,rgba(255,255,255,.3));
+    }
+    .mode-icon { font-size:1.3rem; line-height:1; flex-shrink:0; filter:drop-shadow(0 0 8px var(--theme-glow,rgba(0,170,255,.6))); }
+    .mode-meta { min-width:0; flex:1; }
+    .mode-meta .mode-title { font-size:.78rem; font-weight:700; color:#fff; line-height:1.2; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .mode-meta .mode-sub   { font-size:.6rem; color:rgba(255,255,255,.5); margin-top:1px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
+    /* Themed body background — set per-style via CSS vars. */
+    :root {
+      --theme-bg-1: rgba(0,0,80,.9);
+      --theme-bg-2: rgba(30,0,60,.85);
+      --theme-bg-3: rgba(0,20,60,.9);
+      --theme-glow: rgba(0,170,255,.6);
+      --theme-accent: #00aaff;
+      --theme-border: rgba(0,170,255,.4);
+    }
+    .themed-bg {
+      position:fixed; inset:0; z-index:-2; pointer-events:none;
+      background:linear-gradient(135deg, var(--theme-bg-1) 0%, var(--theme-bg-2) 50%, var(--theme-bg-3) 100%);
+      transition:background 0.8s ease;
+    }
+    .theme-orb-1, .theme-orb-2 {
+      position:fixed; border-radius:50%; filter:blur(140px); pointer-events:none; z-index:-1;
+      transition:background 0.8s ease;
+    }
+    .theme-orb-1 {
+      width:650px; height:650px; top:-200px; left:-200px;
+      background:var(--theme-glow);
+      opacity:.4;
+      animation:orbBreath1 5s ease-in-out infinite;
+    }
+    .theme-orb-2 {
+      width:500px; height:500px; bottom:-150px; right:-150px;
+      background:var(--theme-glow);
+      opacity:.25;
+      animation:orbBreath2 6s ease-in-out infinite;
+    }
+    @keyframes orbBreath1 { 0%,100%{transform:scale(1);opacity:.4} 50%{transform:scale(1.15);opacity:.75} }
+    @keyframes orbBreath2 { 0%,100%{transform:scale(1.1);opacity:.5} 50%{transform:scale(1);opacity:.85} }
+
+    /* Ember particle layer (overlay on hero) */
+    .ember-layer { position:absolute; inset:0; pointer-events:none; overflow:hidden; z-index:1; }
+    .ember {
+      position:absolute; width:3px; height:3px; border-radius:50%;
+      background:var(--theme-accent,#00aaff);
+      box-shadow:0 0 8px var(--theme-glow,rgba(0,170,255,.9));
+      animation:emberRise linear infinite;
+    }
+    @keyframes emberRise {
+      0%   { transform:translateY(20px) scale(.4); opacity:0; }
+      15%  { opacity:1; }
+      85%  { opacity:1; }
+      100% { transform:translateY(-180px) scale(.2); opacity:0; }
+    }
+
+    /* Backwards-compat: keep .style-row and .style-pill so any old refs don't break */
+    .style-row,.style-pill,.style-badge,.style-name { display:none; }
 
     .tags { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
     .tag { background:rgba(102,0,255,.08); border:1px solid rgba(102,0,255,.18); border-radius:20px; padding:5px 12px; font-size:.7rem; color:rgba(255,255,255,.5); cursor:pointer; transition:all .2s; }
@@ -470,6 +523,11 @@
 </head>
 <body>
 
+<!-- Global themed background — color swaps when a style mode is picked -->
+<div class="themed-bg"></div>
+<div class="theme-orb-1"></div>
+<div class="theme-orb-2"></div>
+
 <!-- ── HOME ─────────────────────────────────────────────────────────────── -->
 <div id="home" class="screen active">
 
@@ -478,6 +536,8 @@
     <div class="hero-bg"></div>
     <img class="hero-img" id="hero-img" src="" alt="">
     <div class="hero-grad"></div>
+    <!-- Ember/particle overlay — color matches active style theme -->
+    <div class="ember-layer" id="ember-layer"></div>
     <div class="hero-content">
       <div class="hero-title">ANIMEFORGE</div>
       <div class="hero-jp">アニメ創造エンジン</div>
@@ -517,8 +577,8 @@
         </div>
 
         <div style="margin-top:14px">
-          <label class="label">// Art Style</label>
-          <div id="style-row" class="style-row"></div>
+          <label class="label">// Anime Visual Mode</label>
+          <div id="modes-wrap" class="modes-wrap"></div>
         </div>
 
         <div class="tags">
@@ -731,9 +791,8 @@
   const CAN_4K = {{ 'true' if tier in ('monarch','admin') else 'false' }};
   const CAN_PREMIUM_ANIM = {{ 'true' if tier in ('monarch','admin') else 'false' }};
 
-  // Active art style — set by the picker. The suffix is what we paste into
-  // every Pollinations.ai URL on the client side (for hero/thumbnail previews).
-  // The server uses styles.py for the canonical mapping during export.
+  // Active art style — set by the picker. SL_SUFFIX is what we paste into
+  // every artUrl on the client (hero/thumbnail/poster previews).
   let selectedStyle = 'solo_leveling';
   let SL_SUFFIX = 'Solo Leveling anime art style,A-1 Pictures quality,dark fantasy dungeon aesthetic,dramatic cinematic lighting,deep shadows,glowing blue mana aura,ultra-detailed,4K resolution,hyper-detailed background,volumetric light rays,epic composition';
 
@@ -745,52 +804,98 @@
     return `/scene-art?prompt=${p}&seed=${seed || 0}&w=${w}&h=${h}`;
   }
 
-  // Frontend mirror of the server's STYLES dict — just enough for live previews.
-  // Server is authoritative; this exists so changing the style doesn't require
-  // a round-trip just to re-render the hero image.
-  const STYLE_SUFFIXES = {
-    solo_leveling: 'Solo Leveling anime art style,A-1 Pictures quality,dark fantasy dungeon aesthetic,dramatic cinematic lighting,deep shadows,glowing blue mana aura,ultra-detailed,4K resolution,hyper-detailed background,volumetric light rays,epic composition',
-    demon_slayer:  'Demon Slayer anime art style,ufotable quality,vivid color grading,traditional Japanese setting,intricate kimono patterns,ink-wash backgrounds,water and flame effects,particle-rich atmosphere,4K,cinematic depth of field',
-    ghibli:        'Studio Ghibli anime art style,Miyazaki-inspired,soft watercolor backgrounds,warm natural light,lush environments,hand-painted texture,gentle hues,whimsical detail,4K',
-    cyberpunk:     'cyberpunk anime art style,Akira and Ghost in the Shell influence,neon-drenched megacity,rain-slick streets,holographic signage,chrome implants,magenta and cyan rim light,4K',
-    jjk:           'Jujutsu Kaisen anime art style,MAPPA quality,dark sorcery aesthetic,cursed energy effects,explosive black-and-violet auras,modern Tokyo backdrop,kinetic action lines,4K',
-    aot:           'Attack on Titan anime art style,WIT MAPPA quality,gritty militaristic atmosphere,ODM gear in motion,walled cities,muted earth tones,high contrast,4K cinematic',
-    slice_of_life: 'modern slice-of-life anime art style,KyoAni quality,soft pastel palette,sunlit interiors,gentle expressions,clean lineart,4K warm cozy lighting',
-    dark_fantasy:  'dark fantasy anime art style,Berserk-inspired,gothic medieval setting,intricate armor,eldritch creatures,crosshatching texture,oppressive shadows,torchlit detail,4K painterly',
-    shonen_battle: 'classic shonen anime art style,Bones Studio Pierrot quality,vibrant color palette,dynamic action poses,speed lines,explosive energy attacks,4K kinetic',
-    isekai:        'modern isekai anime art style,vibrant high-fantasy world,status-window UI overlays,guild halls and dungeons,magic-circle effects,bright fantasy palette,4K JRPG composition',
+  // Per-style theme data: drives body background, glow orbs, ember color, picker
+  // card accent. Mirrors the React reference Justen pasted ("Anime Visual Modes").
+  // Each entry carries:
+  //   - suffix: the image-prompt tail appended to every artUrl
+  //   - icon: emoji shown in the picker card
+  //   - sub: small caption shown in the picker card
+  //   - bg: 3 colors for the body radial gradient
+  //   - glow: rgba for the blob behind the hero + ember halo
+  //   - accent: hex for accent text + ember core
+  //   - border: rgba for active-card outline
+  const STYLES_FULL = {
+    solo_leveling: { icon:'⚔️', sub:'Shadow Hunter style', suffix:'Solo Leveling anime art style,A-1 Pictures quality,dark fantasy dungeon aesthetic,dramatic cinematic lighting,deep shadows,glowing blue mana aura,ultra-detailed,4K resolution,hyper-detailed background,volumetric light rays,epic composition', bg:['rgba(0,0,80,.9)','rgba(30,0,60,.85)','rgba(0,20,60,.9)'], glow:'rgba(0,170,255,.6)', accent:'#00aaff', border:'rgba(0,170,255,.5)' },
+    demon_slayer:  { icon:'🔥', sub:'Breathing blade style', suffix:'Demon Slayer anime art style,ufotable quality,vivid color grading,traditional Japanese setting,intricate kimono patterns,ink-wash backgrounds,water and flame effects,particle-rich atmosphere,4K,cinematic depth of field', bg:['rgba(0,0,0,.95)','rgba(80,0,0,.85)','rgba(60,30,0,.9)'], glow:'rgba(255,140,40,.6)', accent:'#ff9244', border:'rgba(255,140,40,.55)' },
+    ghibli:        { icon:'✨', sub:'Whimsical nature style', suffix:'Studio Ghibli anime art style,Miyazaki-inspired,soft watercolor backgrounds,warm natural light,lush environments,hand-painted texture,gentle hues,whimsical detail,4K', bg:['rgba(0,40,60,.85)','rgba(0,60,40,.85)','rgba(80,70,20,.85)'], glow:'rgba(120,220,150,.55)', accent:'#9cefb4', border:'rgba(120,220,150,.55)' },
+    cyberpunk:     { icon:'⚡', sub:'Neon future style', suffix:'cyberpunk anime art style,Akira and Ghost in the Shell influence,neon-drenched megacity,rain-slick streets,holographic signage,chrome implants,magenta and cyan rim light,4K', bg:['rgba(0,0,0,.95)','rgba(80,0,80,.85)','rgba(0,60,80,.85)'], glow:'rgba(60,220,255,.6)', accent:'#3cdcff', border:'rgba(60,220,255,.55)' },
+    jjk:           { icon:'💀', sub:'Occult combat style', suffix:'Jujutsu Kaisen anime art style,MAPPA quality,dark sorcery aesthetic,cursed energy effects,explosive black-and-violet auras,modern Tokyo backdrop,kinetic action lines,4K', bg:['rgba(0,0,0,.95)','rgba(40,0,80,.85)','rgba(60,0,100,.85)'], glow:'rgba(170,100,255,.6)', accent:'#aa64ff', border:'rgba(170,100,255,.55)' },
+    aot:           { icon:'🛡️', sub:'Titan war style', suffix:'Attack on Titan anime art style,WIT MAPPA quality,gritty militaristic atmosphere,ODM gear in motion,walled cities,muted earth tones,high contrast,4K cinematic', bg:['rgba(40,30,15,.9)','rgba(80,50,0,.85)','rgba(0,0,0,.95)'], glow:'rgba(255,170,60,.55)', accent:'#ffaa3c', border:'rgba(255,170,60,.55)' },
+    slice_of_life: { icon:'⭐', sub:'Warm everyday style', suffix:'modern slice-of-life anime art style,KyoAni quality,soft pastel palette,sunlit interiors,gentle expressions,clean lineart,4K warm cozy lighting', bg:['rgba(80,40,60,.85)','rgba(80,30,50,.85)','rgba(80,50,30,.85)'], glow:'rgba(255,180,210,.55)', accent:'#ffb4d2', border:'rgba(255,180,210,.55)' },
+    dark_fantasy:  { icon:'🌙', sub:'Black crown style', suffix:'dark fantasy anime art style,Berserk-inspired,gothic medieval setting,intricate armor,eldritch creatures,crosshatching texture,oppressive shadows,torchlit detail,4K painterly', bg:['rgba(0,0,0,.95)','rgba(20,15,30,.85)','rgba(40,0,60,.85)'], glow:'rgba(140,90,200,.55)', accent:'#8c5ac8', border:'rgba(140,90,200,.55)' },
+    shonen_battle: { icon:'🗡️', sub:'Hero clash style', suffix:'classic shonen anime art style,Bones Studio Pierrot quality,vibrant color palette,dynamic action poses,speed lines,explosive energy attacks,4K kinetic', bg:['rgba(60,0,20,.85)','rgba(0,20,60,.85)','rgba(0,0,0,.95)'], glow:'rgba(80,180,255,.6)', accent:'#50b4ff', border:'rgba(80,180,255,.55)' },
+    isekai:        { icon:'🏔️', sub:'Portal adventure style', suffix:'modern isekai anime art style,vibrant high-fantasy world,status-window UI overlays,guild halls and dungeons,magic-circle effects,bright fantasy palette,4K JRPG composition', bg:['rgba(20,0,60,.85)','rgba(0,40,40,.85)','rgba(0,0,0,.95)'], glow:'rgba(80,255,200,.55)', accent:'#50ffc8', border:'rgba(80,255,200,.55)' },
   };
 
+  function applyTheme(key){
+    const t = STYLES_FULL[key];
+    if(!t) return;
+    const r = document.documentElement.style;
+    r.setProperty('--theme-bg-1', t.bg[0]);
+    r.setProperty('--theme-bg-2', t.bg[1]);
+    r.setProperty('--theme-bg-3', t.bg[2]);
+    r.setProperty('--theme-glow', t.glow);
+    r.setProperty('--theme-accent', t.accent);
+    r.setProperty('--theme-border', t.border);
+  }
+
+  // Render 30 embers with randomized positions + speeds. Color follows the
+  // theme via CSS variables (no need to re-render on style change).
+  (function seedEmbers(){
+    const layer = document.getElementById('ember-layer');
+    if(!layer) return;
+    for(let i=0;i<30;i++){
+      const e = document.createElement('span');
+      e.className = 'ember';
+      e.style.left = (Math.random()*100) + '%';
+      e.style.bottom = (Math.random()*40) + '%';
+      e.style.animationDuration = (3 + Math.random()*4) + 's';
+      e.style.animationDelay = (Math.random()*5) + 's';
+      layer.appendChild(e);
+    }
+  })();
+
   function setStyle(key){
-    if(!STYLE_SUFFIXES[key]) return;
+    if(!STYLES_FULL[key]) return;
     selectedStyle = key;
-    SL_SUFFIX = STYLE_SUFFIXES[key];
-    document.querySelectorAll('.style-pill').forEach(p => {
+    SL_SUFFIX = STYLES_FULL[key].suffix;
+    document.querySelectorAll('.mode-card').forEach(p => {
       p.classList.toggle('active', p.dataset.style === key);
     });
-    // Re-render the hero image with the new style so the user gets immediate visual feedback
+    applyTheme(key);
+    // Re-render the hero image with the new style
     const heroImg = document.getElementById('hero-img');
     if (heroImg) {
       heroImg.src = artUrl('anime cinematic key visual, shadow monarch awakening, dark fantasy dungeon, ' + SL_SUFFIX, 1280, 720, 42);
     }
   }
 
-  // Populate the style picker on load
+  // Populate the visual-modes picker on load
   (async function loadStyles(){
     try{
       const res = await fetch('/styles');
       const data = await res.json();
-      const row = document.getElementById('style-row');
-      if (!row) return;
-      row.innerHTML = (data.styles || []).map(s => `
-        <div class="style-pill ${s.key === (data.default || 'solo_leveling') ? 'active' : ''}"
+      const wrap = document.getElementById('modes-wrap');
+      if (!wrap) return;
+      const defaultKey = data.default || 'solo_leveling';
+      wrap.innerHTML = (data.styles || []).map(s => {
+        const meta = STYLES_FULL[s.key] || {};
+        return `
+        <div class="mode-card ${s.key === defaultKey ? 'active' : ''}"
              data-style="${s.key}" onclick="setStyle('${s.key}')">
-          <span class="style-badge">${s.badge}</span>
-          <span class="style-name">${s.name}</span>
-        </div>
-      `).join('');
-      if (data.default) selectedStyle = data.default;
-    } catch(e) { /* picker is non-critical; default style still works */ }
+          <span class="mode-icon">${meta.icon || '◆'}</span>
+          <div class="mode-meta">
+            <div class="mode-title">${s.name}</div>
+            <div class="mode-sub">${meta.sub || ''}</div>
+          </div>
+        </div>`;
+      }).join('');
+      selectedStyle = defaultKey;
+      applyTheme(defaultKey);
+    } catch(e) {
+      // picker is non-critical; theme just stays on default values
+      applyTheme('solo_leveling');
+    }
   })();
 
   // Touch swipe on viewport
