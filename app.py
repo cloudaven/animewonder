@@ -149,6 +149,68 @@ def extract_json(text):
     return text[start:]
 
 
+def _fal_image(prompt, width, height, model="hunyuan", seed=None):
+    """
+    Generate a single anime-quality image via fal.ai. Returns JPEG bytes or None.
+
+    Why this exists: Pollinations.ai (free default) produces unreliable anime
+    faces — eyes drift off, mouth/nose distort, hair detail muddies. fal.ai's
+    Hunyuan 3.0 and ByteDance Seedream 4.5 are the 2026 SOTA for anime
+    character art. Admin and paid tiers route through here; free still uses
+    Pollinations (cost: $0).
+
+    Models:
+      - "hunyuan"  → fal-ai/hunyuan-image/v3/text-to-image  (best for anime / character art)
+      - "seedream" → fal-ai/bytedance/seedream/v4/text-to-image  (best general / cinematic)
+    Cost is roughly $0.04 per image at the time of writing.
+    """
+    if not FAL_KEY:
+        return None
+    import fal_client
+
+    endpoint = (
+        "fal-ai/hunyuan-image/v3/text-to-image"
+        if model == "hunyuan"
+        else "fal-ai/bytedance/seedream/v4/text-to-image"
+    )
+
+    if width == height:
+        image_size = "square_hd"
+    elif width > height:
+        image_size = "landscape_16_9"
+    else:
+        image_size = "portrait_16_9"
+
+    args = {
+        "prompt": prompt[:1500],
+        "image_size": image_size,
+        "num_images": 1,
+        "enable_safety_checker": True,
+    }
+    if seed is not None:
+        args["seed"] = int(seed)
+
+    try:
+        result = fal_client.subscribe(endpoint, arguments=args, with_logs=False)
+        images = result.get("images") or []
+        if images:
+            url = images[0].get("url")
+            if url:
+                r = http.get(url, timeout=90)
+                if r.status_code == 200:
+                    return r.content
+    except Exception as exc:
+        print(f"[fal-image] {model} failed: {exc}", flush=True)
+    return None
+
+
+# Bounded in-memory cache for /scene-art so the browser hitting the same prompt+seed
+# twice (back-button, re-watch, autoplay loop) doesn't re-spend $0.04 each time.
+# Keyed on (prompt, seed, w, h). Cleared whole when it crosses ~200 entries.
+_SCENE_ART_CACHE: dict = {}
+_SCENE_ART_CACHE_MAX = 200
+
+
 def paypal_base():
     return "https://api-m.sandbox.paypal.com" if PAYPAL_MODE == "sandbox" else "https://api-m.paypal.com"
 
@@ -959,6 +1021,52 @@ def styles_list():
     return jsonify({"styles": styles_public(), "default": DEFAULT_STYLE})
 
 
+@app.route("/scene-art")
+@login_required
+def scene_art():
+    """
+    Image proxy for scene/thumbnail/hero art.
+
+    Admin and Monarch tiers → fal.ai Hunyuan Image 3.0 (anime SOTA quality, $0.04/img).
+    Free and Hunter tiers   → Pollinations.ai (free, but unreliable faces).
+
+    Results are cached in-memory by (prompt, seed, w, h) so reloading the same
+    scene doesn't re-spend per view.
+    """
+    prompt = (request.args.get("prompt") or "").strip()[:1500]
+    seed = request.args.get("seed", type=int)
+    w = max(64, min(2048, request.args.get("w", default=512, type=int)))
+    h = max(64, min(2048, request.args.get("h", default=288, type=int)))
+    if not prompt:
+        return "missing prompt", 400
+
+    tier = "admin" if session.get("is_admin") else session.get("tier", "free")
+    use_fal = tier in ("monarch", "admin") and bool(FAL_KEY)
+
+    if use_fal:
+        cache_key = (prompt, seed or 0, w, h)
+        cached = _SCENE_ART_CACHE.get(cache_key)
+        if cached:
+            return Response(cached, mimetype="image/jpeg",
+                            headers={"Cache-Control": "public, max-age=3600",
+                                     "X-Image-Source": "fal-hunyuan-cached"})
+        img_bytes = _fal_image(prompt, w, h, model="hunyuan", seed=seed)
+        if img_bytes:
+            if len(_SCENE_ART_CACHE) >= _SCENE_ART_CACHE_MAX:
+                _SCENE_ART_CACHE.clear()  # simple bounded eviction
+            _SCENE_ART_CACHE[cache_key] = img_bytes
+            return Response(img_bytes, mimetype="image/jpeg",
+                            headers={"Cache-Control": "public, max-age=3600",
+                                     "X-Image-Source": "fal-hunyuan"})
+        # fal failed → fall through to Pollinations redirect rather than 500
+
+    pollinations_url = (
+        f"https://image.pollinations.ai/prompt/{quote(prompt)}"
+        f"?width={w}&height={h}&seed={seed or 0}&nologo=true&enhance=true&model=flux"
+    )
+    return redirect(pollinations_url, code=302)
+
+
 # ── Video export ───────────────────────────────────────────────────────────────
 
 MIN_DUR = {"episode":15,"short":30,"movie":90}
@@ -1195,26 +1303,48 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
                 job["eta_seconds"] = int(elapsed / i * (n - i))
 
             # ── Step 1: Generate scene image (live preview shown here) ──
-            job["message"] = f"Scene {i+1}/{n} — generating art…"
+            # Try fal.ai Hunyuan first (anime SOTA — fixes Pollinations face drift).
+            # Fall back to Pollinations on any failure so the export never dies just
+            # because fal.ai had a hiccup.
+            job["message"] = f"Scene {i+1}/{n} — generating art (Hunyuan 3.0)…" if FAL_KEY \
+                             else f"Scene {i+1}/{n} — generating art…"
             img_path = os.path.join(tmp, f"img_{i}.jpg")
             raw_prompt = _build_scene_image_prompt(sc, characters_by_name, style_suffix)
-            prompt   = quote(raw_prompt)
             # Stable per-scene seed bound to the run seed → same characters across rerolls
             seed = run_seed + i * 17 + 3
-            img_url  = (f"https://image.pollinations.ai/prompt/{prompt}"
-                        f"?width={W}&height={H}&seed={seed}&nologo=true&enhance=true&model=flux")
+
+            img_bytes = None
+            if FAL_KEY:
+                img_bytes = _fal_image(raw_prompt, W, H, model="hunyuan", seed=seed)
+                if img_bytes:
+                    job["message"] = f"Scene {i+1}/{n} — Hunyuan art ready ✓"
+            if not img_bytes:
+                # Pollinations fallback
+                prompt = quote(raw_prompt)
+                img_url = (f"https://image.pollinations.ai/prompt/{prompt}"
+                           f"?width={W}&height={H}&seed={seed}&nologo=true&enhance=true&model=flux")
+                try:
+                    r = http.get(img_url, timeout=90)
+                    if r.status_code == 200:
+                        img_bytes = r.content
+                except Exception:
+                    img_bytes = None
+
             try:
-                r = http.get(img_url, timeout=90)
-                with open(img_path, "wb") as f: f.write(r.content)
-                img = Image.open(img_path).convert("RGB").resize((W, H), Image.LANCZOS)
-                img.save(img_path, "JPEG", quality=90)
-                # Stream 320×180 thumbnail to browser (live preview — step 2 visible to user)
-                thumb = img.copy()
-                thumb.thumbnail((320, 180))
-                buf = io.BytesIO()
-                thumb.save(buf, "JPEG", quality=60)
-                job["current_img_b64"] = ("data:image/jpeg;base64,"
-                                          + base64.b64encode(buf.getvalue()).decode())
+                if img_bytes:
+                    with open(img_path, "wb") as f:
+                        f.write(img_bytes)
+                    img = Image.open(img_path).convert("RGB").resize((W, H), Image.LANCZOS)
+                    img.save(img_path, "JPEG", quality=92)
+                    # Stream 320×180 thumbnail to browser (live preview — step 2 visible to user)
+                    thumb = img.copy()
+                    thumb.thumbnail((320, 180))
+                    buf = io.BytesIO()
+                    thumb.save(buf, "JPEG", quality=60)
+                    job["current_img_b64"] = ("data:image/jpeg;base64,"
+                                              + base64.b64encode(buf.getvalue()).decode())
+                else:
+                    Image.new("RGB", (W, H), (5, 10, 25)).save(img_path, "JPEG")
             except Exception:
                 Image.new("RGB", (W, H), (5, 10, 25)).save(img_path, "JPEG")
 
@@ -1332,13 +1462,21 @@ def start_export():
     style_key  = (data.get("style") or DEFAULT_STYLE).strip()
     if style_key not in STYLES:
         style_key = DEFAULT_STYLE
-    # Animation model selection. "local" is free (FFmpeg zoompan), "wan" is the
-    # default paid option (~$0.25/clip, Hunter+), "kling" is premium (~$0.35/clip,
-    # Monarch+ only). We default to "local" so a Hunter who clicks Animate without
-    # picking a model still gets *something* without surprise fal.ai charges.
-    anim_model = (data.get("anim_model") or "local").strip()
+    # Animation model selection. "local" = free FFmpeg zoompan (Ken Burns; not real
+    # motion — what Justen called "back and forth"). "wan" = fal.ai Wan 2.5 real
+    # anime motion (~$0.25/clip). "kling" = premium Kling 1.6 Pro (~$0.35/clip).
+    # Admin tier defaults to Wan when FAL_KEY is present — the whole point of
+    # Justen's setup is that the public site looks like real anime, not slideshows.
+    anim_model = (data.get("anim_model") or "").strip()
     if anim_model not in ("local", "wan", "kling"):
-        anim_model = "local"
+        anim_model = ""  # empty → tier default below
+    if not anim_model:
+        if tier == "admin" and FAL_KEY:
+            anim_model = "wan"
+        elif tier == "monarch" and FAL_KEY:
+            anim_model = "wan"
+        else:
+            anim_model = "local"
     # Tier-gate the premium paid models
     if anim_model == "kling" and tier not in ("monarch", "admin"):
         anim_model = "wan"

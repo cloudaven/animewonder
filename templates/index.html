@@ -737,6 +737,14 @@
   let selectedStyle = 'solo_leveling';
   let SL_SUFFIX = 'Solo Leveling anime art style,A-1 Pictures quality,dark fantasy dungeon aesthetic,dramatic cinematic lighting,deep shadows,glowing blue mana aura,ultra-detailed,4K resolution,hyper-detailed background,volumetric light rays,epic composition';
 
+  // Route all art through /scene-art (server-side proxy). Admin + Monarch tiers
+  // → fal.ai Hunyuan 3.0 (anime SOTA, fixes Pollinations face drift). Free/Hunter
+  // → server 302-redirects to Pollinations (same as before, no cost change).
+  function artUrl(promptStr, w, h, seed) {
+    const p = encodeURIComponent(promptStr);
+    return `/scene-art?prompt=${p}&seed=${seed || 0}&w=${w}&h=${h}`;
+  }
+
   // Frontend mirror of the server's STYLES dict — just enough for live previews.
   // Server is authoritative; this exists so changing the style doesn't require
   // a round-trip just to re-render the hero image.
@@ -763,8 +771,7 @@
     // Re-render the hero image with the new style so the user gets immediate visual feedback
     const heroImg = document.getElementById('hero-img');
     if (heroImg) {
-      const prompt = encodeURIComponent('anime cinematic key visual, shadow monarch awakening, dark fantasy dungeon, ' + SL_SUFFIX);
-      heroImg.src = `https://image.pollinations.ai/prompt/${prompt}?width=1280&height=720&seed=42&nologo=true&model=flux`;
+      heroImg.src = artUrl('anime cinematic key visual, shadow monarch awakening, dark fantasy dungeon, ' + SL_SUFFIX, 1280, 720, 42);
     }
   }
 
@@ -817,20 +824,18 @@
   // ── Thumbnail helpers ──────────────────────────────────────────────────────
   function simpleHash(s){let h=0;for(let i=0;i<s.length;i++)h=Math.imul(31,h)+s.charCodeAt(i)|0;return Math.abs(h)%9999;}
   function thumbUrl(title,genre,seed){
-    const prompt=encodeURIComponent(`anime key visual, ${title||'dark anime'}, ${genre||'dark fantasy'}, cinematic, ${SL_SUFFIX}`);
-    return `https://image.pollinations.ai/prompt/${prompt}?width=384&height=216&seed=${seed||simpleHash(title||'x')}&nologo=true&model=flux`;
+    const p=`anime key visual, ${title||'dark anime'}, ${genre||'dark fantasy'}, cinematic, ${SL_SUFFIX}`;
+    return artUrl(p, 384, 216, seed||simpleHash(title||'x'));
   }
   function sceneThumbUrl(sc,idx){
     const base=sc.image_prompt||`anime scene, ${sc.setting||''}, ${sc.mood||'epic'} atmosphere`;
-    const prompt=encodeURIComponent(`${base},${SL_SUFFIX}`);
-    return `https://image.pollinations.ai/prompt/${prompt}?width=384&height=216&seed=${idx*17+5}&nologo=true&model=flux`;
+    return artUrl(`${base},${SL_SUFFIX}`, 384, 216, idx*17+5);
   }
 
   // Load hero bg with a cinematic default
   (function loadHeroBg(){
     const heroImg=document.getElementById('hero-img');
-    const prompt=encodeURIComponent('anime cinematic key visual, shadow monarch awakening, dark fantasy dungeon, glowing blue mana, Solo Leveling aesthetic, ultra-detailed, 4K');
-    heroImg.src=`https://image.pollinations.ai/prompt/${prompt}?width=1280&height=720&seed=42&nologo=true&model=flux`;
+    heroImg.src=artUrl('anime cinematic key visual, shadow monarch awakening, dark fantasy dungeon, glowing blue mana, '+SL_SUFFIX, 1280, 720, 42);
   })();
 
   // ── Generate ───────────────────────────────────────────────────────────────
@@ -959,8 +964,9 @@
     updateFilmstripActive(idx);
 
     const base=sc.image_prompt||`anime scene, ${sc.setting}, ${sc.mood} atmosphere`;
-    const prompt=encodeURIComponent(`${base},${SL_SUFFIX}`);
-    loadSceneImg(`https://image.pollinations.ai/prompt/${prompt}?width=1920&height=1080&seed=${idx*17+5}&nologo=true&enhance=true&model=flux`);
+    // /scene-art → fal.ai Hunyuan for admin/Monarch (anime SOTA, fixes face drift);
+    // Pollinations redirect for free/Hunter (no cost change).
+    loadSceneImg(artUrl(`${base},${SL_SUFFIX}`, 1920, 1080, idx*17+5));
 
     const dlist=document.getElementById('dlist');
     dlist.innerHTML='';
@@ -1056,8 +1062,8 @@
 
   // Netflix poster URL — 2:3 portrait ratio like Netflix/Crunchyroll show cards
   function posterUrl(title, genre, seed){
-    const prompt = encodeURIComponent(`anime show poster, portrait format, ${title||'dark anime'}, ${genre||'dark fantasy'}, dramatic lighting, ${SL_SUFFIX}`);
-    return `https://image.pollinations.ai/prompt/${prompt}?width=300&height=450&seed=${seed||simpleHash(title||'x')}&nologo=true&model=flux`;
+    const p = `anime show poster, portrait format, ${title||'dark anime'}, ${genre||'dark fantasy'}, dramatic lighting, ${SL_SUFFIX}`;
+    return artUrl(p, 300, 450, seed||simpleHash(title||'x'));
   }
 
   function matchScore(title){
