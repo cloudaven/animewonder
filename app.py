@@ -1817,6 +1817,14 @@ def start_export():
         anim_model = "wan"
     if anim_model in ("wan", "kling") and not FAL_KEY:
         anim_model = "local"   # no key → free fallback
+    # Admin override: if the home GPU tunnel is configured, always prefer it
+    # over fal.ai paid paths — admin's whole point is generating for free on
+    # his own hardware. Frontend hardcodes "kling" / "wan" for premium-capable
+    # users, so without this override admin would always pay even when his
+    # GPU is live. fal.ai still kicks in as fallback inside do_export() if the
+    # tunnel call fails.
+    if tier == "admin" and COMFY_LOCAL_URL and anim_model in ("wan", "kling"):
+        anim_model = "comfy_local"
     if quality == "4k" and tier not in ("monarch", "admin"):
         quality = "1080p"
     if animate and not FAL_KEY and anim_model not in ("local", "comfy_local"):
