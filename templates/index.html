@@ -1469,25 +1469,54 @@
       const d=await res.json();
       if(!res.ok) throw new Error(d.error||'Export failed');
       exportJobId=d.job_id;
-      const es=new EventSource(`/export-status/${exportJobId}`);
-      es.onmessage=function(e){
-        const job=JSON.parse(e.data);
-        document.getElementById('exp-msg').textContent=job.message||'';
-        const pct=job.progress||0;
-        document.getElementById('exp-bar').style.width=pct+'%';
-        document.getElementById('exp-pct').textContent=pct+'%';
-        if(job.current_img_b64){
-          const ri=document.getElementById('exp-render-img'),rp=document.getElementById('exp-render-placeholder');
-          ri.src=job.current_img_b64; ri.style.display='block'; rp.style.display='none';
+      // Switched from EventSource (SSE) to polling fetch — SSE was being killed by
+      // Render's edge proxy on long exports and by background-tab throttling on the
+      // browser. Polling each cycle is short-lived, recovers automatically from
+      // transient network blips, and works fine when the tab is backgrounded.
+      let consecutiveErrors = 0;
+      const pollInterval = window.setInterval(async () => {
+        try {
+          const r = await fetch(`/export-status/${exportJobId}`, { cache: 'no-store' });
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          const job = await r.json();
+          consecutiveErrors = 0;
+          document.getElementById('exp-msg').textContent = job.message || '';
+          const pct = job.progress || 0;
+          document.getElementById('exp-bar').style.width = pct + '%';
+          document.getElementById('exp-pct').textContent = pct + '%';
+          if (job.current_img_b64) {
+            const ri = document.getElementById('exp-render-img'), rp = document.getElementById('exp-render-placeholder');
+            ri.src = job.current_img_b64; ri.style.display = 'block'; rp.style.display = 'none';
+          }
+          if (job.current_scene_title) document.getElementById('exp-render-scene-label').textContent = job.current_scene_title;
+          if (job.scenes_total) document.getElementById('exp-scenes-done').textContent = `Scene ${job.scenes_done || 0}/${job.scenes_total}`;
+          if (job.elapsed_seconds != null) { const m = Math.floor(job.elapsed_seconds / 60), s = job.elapsed_seconds % 60; document.getElementById('exp-elapsed').textContent = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`; }
+          if (job.eta_seconds != null && job.eta_seconds > 0) { const m = Math.floor(job.eta_seconds / 60), s = job.eta_seconds % 60; document.getElementById('exp-eta').textContent = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`; }
+          if (job.status === 'complete') {
+            clearInterval(pollInterval);
+            exportSrc = `/download/${exportJobId}`;
+            document.getElementById('btn-dl').style.display = 'block';
+          } else if (job.status === 'error') {
+            clearInterval(pollInterval);
+            document.getElementById('exp-msg').textContent = 'Error: ' + (job.error || 'Unknown');
+          } else if (job.status === 'not_found') {
+            // Render redeployed mid-export or the export thread crashed before recording an error.
+            clearInterval(pollInterval);
+            document.getElementById('exp-msg').textContent = 'Export job lost — the server may have restarted. Try again.';
+          }
+        } catch (err) {
+          // Transient — wait and retry. Only give up after ~30 sec of failures
+          // (15 polls × 2 sec) so a brief network blip doesn't kill a 5-minute export.
+          consecutiveErrors += 1;
+          if (consecutiveErrors === 1) {
+            document.getElementById('exp-msg').textContent = 'Reconnecting…';
+          }
+          if (consecutiveErrors >= 15) {
+            clearInterval(pollInterval);
+            document.getElementById('exp-msg').textContent = 'Connection lost. Reload and try again.';
+          }
         }
-        if(job.current_scene_title) document.getElementById('exp-render-scene-label').textContent=job.current_scene_title;
-        if(job.scenes_total) document.getElementById('exp-scenes-done').textContent=`Scene ${job.scenes_done||0}/${job.scenes_total}`;
-        if(job.elapsed_seconds!=null){const m=Math.floor(job.elapsed_seconds/60),s=job.elapsed_seconds%60;document.getElementById('exp-elapsed').textContent=`${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;}
-        if(job.eta_seconds!=null&&job.eta_seconds>0){const m=Math.floor(job.eta_seconds/60),s=job.eta_seconds%60;document.getElementById('exp-eta').textContent=`${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;}
-        if(job.status==='complete'){es.close();exportSrc=`/download/${exportJobId}`;document.getElementById('btn-dl').style.display='block';}
-        else if(job.status==='error'){es.close();document.getElementById('exp-msg').textContent='Error: '+(job.error||'Unknown');}
-      };
-      es.onerror=function(){es.close();document.getElementById('exp-msg').textContent='Connection lost. Try again.';};
+      }, 2000);
     }catch(e){document.getElementById('exp-msg').textContent='Error: '+e.message;}
   }
 

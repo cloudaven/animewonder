@@ -1588,10 +1588,27 @@ def start_export():
 @app.route("/export-status/<job_id>")
 @login_required
 def export_status(job_id):
+    """
+    JSON status snapshot — browser polls this every ~1.5s rather than holding
+    a long-lived SSE. Plays much better with Render's edge proxy + browser tab
+    lifecycle (background tabs were dropping SSE mid-export).
+
+    Returns the full job dict. Browser stops polling when status == complete |
+    error | not_found.
+    """
+    job = export_jobs.get(job_id, {"status": "not_found"})
+    return jsonify(job)
+
+
+@app.route("/export-status-sse/<job_id>")
+@login_required
+def export_status_sse(job_id):
+    """Legacy SSE endpoint kept around in case anything still references it.
+    The polling endpoint above is the new path."""
     def stream():
         while True:
             job = export_jobs.get(job_id,{"status":"not_found"})
-            yield f"data: {json.dumps(job)}\n\n"
+            yield f"retry: 2000\ndata: {json.dumps(job)}\n\n"
             if job["status"] in ("complete","error","not_found"): break
             time.sleep(1.5)
     return Response(stream(), mimetype="text/event-stream",
