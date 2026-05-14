@@ -76,6 +76,13 @@ PAYPAL_PLAN_MONARCH= os.environ.get("PAYPAL_PLAN_MONARCH", "")
 
 FAL_KEY = os.environ.get("FAL_KEY", "")
 
+# Local ComfyUI bridge (Justen's RTX 4070 Ti SUPER exposed via cloudflared tunnel).
+# When set, admin tier routes animation here instead of paying fal.ai. URL changes
+# each time the cloudflared quick tunnel restarts; token is a long random string
+# the local startup script generates once and AnimeForge sends in every request.
+COMFY_LOCAL_URL   = os.environ.get("COMFY_LOCAL_URL", "").rstrip("/")
+COMFY_LOCAL_TOKEN = os.environ.get("COMFY_LOCAL_TOKEN", "")
+
 # Validate at startup so a missing/typo'd key fails loudly during deploy
 # instead of producing cryptic 500s for the first user who hits a Claude-backed route.
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
@@ -228,6 +235,22 @@ def _mark_fal_locked(reason: str = "") -> None:
     global _FAL_LOCKED_UNTIL
     _FAL_LOCKED_UNTIL = time.time() + 600
     print(f"[fal] circuit open for 10 min — {reason}", flush=True)
+
+
+# Same pattern for the local ComfyUI tunnel. Justen's PC may be asleep, the
+# tunnel may have dropped, or the GPU may be busy with another job. When that
+# happens we don't want every export to wait the full HTTP timeout — we open
+# the circuit for 5 minutes (shorter than fal's 10 because home PCs come back
+# online faster than account balance) and fall through to the fal.ai path.
+_COMFY_LOCKED_UNTIL: float = 0.0
+
+def _comfy_locked() -> bool:
+    return time.time() < _COMFY_LOCKED_UNTIL
+
+def _mark_comfy_locked(reason: str = "") -> None:
+    global _COMFY_LOCKED_UNTIL
+    _COMFY_LOCKED_UNTIL = time.time() + 300
+    print(f"[comfy-local] circuit open for 5 min — {reason}", flush=True)
 
 
 def paypal_base():
@@ -1362,6 +1385,175 @@ def animate_scene_fal(img_path, prompt, tmp_dir, scene_idx, job, model="wan"):
         return None
 
 
+# ── Local ComfyUI bridge (Justen's GPU) ────────────────────────────────────────
+#
+# When `COMFY_LOCAL_URL` env var is set, admin tier routes animation calls to
+# Justen's home RTX 4070 Ti SUPER instead of paying fal.ai. The local GPU runs
+# Wan 2.2 5B I2V via ComfyUI's HTTP API, exposed to the public internet via a
+# Cloudflare tunnel. A shared bearer token gates access so nobody else can
+# burn his electricity.
+#
+# Workflow shape (Wan 2.2 5B image-to-video, 24fps, 720p, ~5s clip):
+#   UNETLoader → wan2.2_ti2v_5B_fp16
+#   CLIPLoader → umt5_xxl_fp8 (type=wan)
+#   VAELoader  → wan2.2_vae
+#   LoadImage  → uploaded still
+#   CLIPTextEncode × 2 (positive + negative)
+#   Wan22ImageToVideoLatent → conditions the latent on the uploaded image
+#   KSampler   → 20 steps, cfg 5, euler/simple
+#   VAEDecode  → frames
+#   CreateVideo + SaveVideo → MP4 in ComfyUI's output dir
+
+_WAN22_NEGATIVE_PROMPT = (
+    "low quality, blurry, distorted, jpeg artifacts, watermark, text, logo, "
+    "extra limbs, deformed face, broken anatomy, static photo, frozen frame"
+)
+
+def _comfy_workflow_wan22_i2v(image_filename: str, prompt: str, seed: int,
+                              width: int = 1280, height: int = 704,
+                              length: int = 121) -> dict:
+    """Build the API-format graph ComfyUI's /prompt endpoint expects.
+
+    length=121 frames at 24fps ≈ 5 seconds. The Wan22ImageToVideoLatent node
+    requires length to satisfy (length - 1) % 4 == 0, so we stick to 121 or 49.
+    """
+    clean = (prompt or "")[:380].strip()
+    return {
+        "1":  {"class_type": "UNETLoader",
+               "inputs": {"unet_name": "wan2.2_ti2v_5B_fp16.safetensors",
+                          "weight_dtype": "default"}},
+        "2":  {"class_type": "CLIPLoader",
+               "inputs": {"clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+                          "type": "wan"}},
+        "3":  {"class_type": "VAELoader",
+               "inputs": {"vae_name": "wan2.2_vae.safetensors"}},
+        "4":  {"class_type": "LoadImage",
+               "inputs": {"image": image_filename}},
+        "5":  {"class_type": "CLIPTextEncode",
+               "inputs": {"clip": ["2", 0],
+                          "text": f"{clean}, fluid anime motion, cinematic camera, detailed character"}},
+        "6":  {"class_type": "CLIPTextEncode",
+               "inputs": {"clip": ["2", 0],
+                          "text": _WAN22_NEGATIVE_PROMPT}},
+        "7":  {"class_type": "Wan22ImageToVideoLatent",
+               "inputs": {"vae": ["3", 0],
+                          "width": width, "height": height, "length": length,
+                          "batch_size": 1, "start_image": ["4", 0]}},
+        "8":  {"class_type": "KSampler",
+               "inputs": {"model": ["1", 0], "seed": int(seed),
+                          "steps": 20, "cfg": 5.0,
+                          "sampler_name": "euler", "scheduler": "simple",
+                          "denoise": 1.0,
+                          "positive": ["5", 0], "negative": ["6", 0],
+                          "latent_image": ["7", 0]}},
+        "9":  {"class_type": "VAEDecode",
+               "inputs": {"samples": ["8", 0], "vae": ["3", 0]}},
+        "10": {"class_type": "CreateVideo",
+               "inputs": {"images": ["9", 0], "fps": 24.0}},
+        "11": {"class_type": "SaveVideo",
+               "inputs": {"video": ["10", 0],
+                          "filename_prefix": "animeforge/clip",
+                          "format": "mp4", "codec": "h264"}},
+    }
+
+
+def _comfy_headers() -> dict:
+    """Authorization header for every call. cloudflared passes it through
+    unchanged; ComfyUI doesn't care about it; a small middleware proxy on
+    the local machine could enforce it. For now we send it on every call so
+    we can lock down the tunnel later without code changes."""
+    h = {}
+    if COMFY_LOCAL_TOKEN:
+        h["Authorization"] = f"Bearer {COMFY_LOCAL_TOKEN}"
+    return h
+
+
+def animate_scene_comfy(img_path, prompt, tmp_dir, scene_idx, job):
+    """Animate a scene using the local ComfyUI tunnel (admin tier path).
+
+    Returns the MP4 path on success, None on failure (circuit breaker trips
+    on connection errors so callers can fall through to fal.ai or static art).
+    Total request takes ~3-5 minutes on the 4070 Ti SUPER for a 5-sec clip.
+    """
+    if not COMFY_LOCAL_URL or _comfy_locked():
+        return None
+
+    import json, mimetypes
+    base = COMFY_LOCAL_URL
+    headers = _comfy_headers()
+
+    try:
+        # Upload the scene image — ComfyUI saves it under its `input/` dir and
+        # returns the filename we then reference from the LoadImage node.
+        with open(img_path, "rb") as fh:
+            mime = mimetypes.guess_type(img_path)[0] or "image/png"
+            files = {"image": (os.path.basename(img_path), fh.read(), mime)}
+        job["message"] = f"Scene {scene_idx+1} — uploading to local GPU…"
+        up = http.post(f"{base}/upload/image", files=files, headers=headers, timeout=60)
+        up.raise_for_status()
+        uploaded_name = up.json().get("name") or os.path.basename(img_path)
+
+        # Submit the workflow. ComfyUI returns a prompt_id we then poll for.
+        seed = abs(hash((img_path, scene_idx))) % 100000
+        workflow = _comfy_workflow_wan22_i2v(uploaded_name, prompt, seed)
+        job["message"] = f"Scene {scene_idx+1} — generating on local GPU…"
+        sub = http.post(f"{base}/prompt",
+                        json={"prompt": workflow, "client_id": "animeforge"},
+                        headers=headers, timeout=30)
+        sub.raise_for_status()
+        prompt_id = sub.json().get("prompt_id")
+        if not prompt_id:
+            _mark_comfy_locked("no prompt_id returned from /prompt")
+            return None
+
+        # Poll history. Wan 2.2 5B takes ~3-5 min on a 4070 Ti SUPER for 5 sec
+        # of 720p video, so generous timeout. Caller's animate_scene loop is
+        # already serialized so we won't queue-bomb the GPU.
+        deadline = time.time() + 600  # 10 min hard ceiling per scene
+        result_filename = None
+        result_subfolder = ""
+        while time.time() < deadline:
+            time.sleep(3)
+            try:
+                h = http.get(f"{base}/history/{prompt_id}", headers=headers, timeout=15)
+                if h.status_code != 200:
+                    continue
+                hist = h.json().get(prompt_id) or {}
+                outputs = hist.get("outputs") or {}
+                # SaveVideo node id = "11" — its output entry contains the saved file
+                save_out = outputs.get("11") or {}
+                files = save_out.get("videos") or save_out.get("images") or []
+                if files:
+                    result_filename = files[0].get("filename")
+                    result_subfolder = files[0].get("subfolder", "")
+                    break
+            except Exception:
+                continue
+
+        if not result_filename:
+            _mark_comfy_locked("generation timed out after 10 min")
+            return None
+
+        # Fetch the rendered MP4 from ComfyUI's /view endpoint.
+        job["message"] = f"Scene {scene_idx+1} — downloading clip from local GPU…"
+        v = http.get(f"{base}/view",
+                     params={"filename": result_filename,
+                             "subfolder": result_subfolder,
+                             "type": "output"},
+                     headers=headers, timeout=120)
+        v.raise_for_status()
+        out_path = os.path.join(tmp_dir, f"anim_{scene_idx}.mp4")
+        with open(out_path, "wb") as fh:
+            fh.write(v.content)
+
+        job["elapsed_seconds"] = int(time.time() - job["start_time"])
+        return out_path
+
+    except Exception as exc:
+        _mark_comfy_locked(f"animate — {str(exc)[:80]}")
+        return None
+
+
 def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEFAULT_STYLE, anim_model="wan"):
     job = export_jobs[job_id]
     job["start_time"] = time.time()
@@ -1463,7 +1655,28 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
             # 5-10 min back to ~1-2 min when balance is the only blocker.
             vid_path = None
             if animate:
-                if anim_model in ("wan", "kling") and FAL_KEY and not _fal_locked():
+                # Dispatch order matters: comfy_local first because it's free for admin,
+                # fal.ai second because paying users fund it, FFmpeg zoompan last because
+                # it's slow on Render shared CPU. Each path falls through to the next
+                # only when the previous one is unavailable / circuit-broken / explicitly
+                # not chosen — we never silently swap a paid model for a free one mid-run.
+                if anim_model == "comfy_local" and COMFY_LOCAL_URL and not _comfy_locked():
+                    vid_path = animate_scene_comfy(img_path, raw_prompt, tmp, i, job)
+                    if vid_path:
+                        job["message"] = f"Scene {i+1}/{n} — local GPU animation done ✓"
+                    elif FAL_KEY and not _fal_locked():
+                        # Justen's PC offline / tunnel dropped → fall through to fal.ai
+                        # so an in-flight admin export doesn't die when the home GPU
+                        # disconnects mid-render.
+                        job["message"] = f"Scene {i+1}/{n} — local GPU unreachable, trying fal.ai…"
+                        vid_path = animate_scene_fal(img_path, raw_prompt, tmp, i, job, model="wan")
+                        if vid_path:
+                            job["message"] = f"Scene {i+1}/{n} — fal.ai fallback animation done ✓"
+                        else:
+                            job["message"] = f"Scene {i+1}/{n} — both local GPU and fal.ai unavailable. Using static art."
+                    else:
+                        job["message"] = f"Scene {i+1}/{n} — local GPU unreachable, using static art"
+                elif anim_model in ("wan", "kling") and FAL_KEY and not _fal_locked():
                     vid_path = animate_scene_fal(img_path, raw_prompt, tmp, i, job, model=anim_model)
                     if vid_path:
                         job["message"] = f"Scene {i+1}/{n} — {anim_model} animation done ✓"
@@ -1577,13 +1790,23 @@ def start_export():
     # Animation model selection. "local" = free FFmpeg zoompan (Ken Burns; not real
     # motion — what Justen called "back and forth"). "wan" = fal.ai Wan 2.5 real
     # anime motion (~$0.25/clip). "kling" = premium Kling 1.6 Pro (~$0.35/clip).
-    # Admin tier defaults to Wan when FAL_KEY is present — the whole point of
-    # Justen's setup is that the public site looks like real anime, not slideshows.
+    # "comfy_local" = Justen's home RTX 4070 Ti SUPER via Cloudflare tunnel
+    # (free for him, slower than fal.ai, gated to admin tier so paying users
+    # don't queue behind him on his single GPU).
+    # Admin tier prefers comfy_local when the tunnel URL is configured —
+    # that's the whole point of Justen's setup: free Wan 2.2 5B animations on
+    # his own hardware, with fal.ai as the fallback when his PC is asleep.
     anim_model = (data.get("anim_model") or "").strip()
-    if anim_model not in ("local", "wan", "kling"):
+    if anim_model not in ("local", "wan", "kling", "comfy_local"):
         anim_model = ""  # empty → tier default below
+    # Only admin can request comfy_local — it's his GPU; paying users get
+    # consistent latency by going through fal.ai's hosted SLA.
+    if anim_model == "comfy_local" and tier != "admin":
+        anim_model = "wan"
     if not anim_model:
-        if tier == "admin" and FAL_KEY:
+        if tier == "admin" and COMFY_LOCAL_URL:
+            anim_model = "comfy_local"
+        elif tier == "admin" and FAL_KEY:
             anim_model = "wan"
         elif tier == "monarch" and FAL_KEY:
             anim_model = "wan"
@@ -1596,8 +1819,9 @@ def start_export():
         anim_model = "local"   # no key → free fallback
     if quality == "4k" and tier not in ("monarch", "admin"):
         quality = "1080p"
-    if animate and not FAL_KEY and anim_model != "local":
-        # Animate requested with paid model but no FAL key — degrade gracefully
+    if animate and not FAL_KEY and anim_model not in ("local", "comfy_local"):
+        # Animate requested with paid model but no FAL key — degrade gracefully.
+        # comfy_local is exempt because it uses Justen's GPU, not fal.ai.
         anim_model = "local"
     if not story or not story.get("scenes"):
         return jsonify({"error": "No story provided"}), 400
