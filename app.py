@@ -527,7 +527,8 @@ def generate_season_bible():
 
     client = anthropic.Anthropic(api_key=api_key)
 
-    response = client.messages.create(
+    # Streaming required by Anthropic SDK at this max_tokens / opus combination
+    stream_kwargs = dict(
         model="claude-sonnet-4-6",
         max_tokens=16000,
         extra_headers={"anthropic-beta": "output-128k-2025-02-19"},
@@ -566,6 +567,14 @@ Return ONLY this JSON (be concise in each field):
 
 Include all 12 episodes. Keep every field short — full detail comes when each episode is generated."""}]
     )
+
+    try:
+        with client.messages.stream(**stream_kwargs) as stream:
+            response = stream.get_final_message()
+    except anthropic.APIError as e:
+        return jsonify({"error": f"Claude API error: {str(e)[:200]}"}), 502
+    except Exception as e:
+        return jsonify({"error": f"Unexpected error calling Claude: {str(e)[:200]}"}), 500
 
     try:
         bible = json.loads(extract_json(response.content[0].text))
@@ -619,7 +628,7 @@ def generate_season_episode():
         f"Characters: {', '.join(c.get('name','?') for c in bible.get('characters',[]))}"
     )
 
-    response = client.messages.create(
+    stream_kwargs = dict(
         model="claude-sonnet-4-6",
         max_tokens=12000,
         extra_headers={"anthropic-beta": "output-128k-2025-02-19"},
@@ -661,6 +670,14 @@ Return ONLY a JSON object:
 
 Create exactly 6 scenes. Keep it consistent with the series characters and world. End on the specified cliffhanger."""}]
     )
+
+    try:
+        with client.messages.stream(**stream_kwargs) as stream:
+            response = stream.get_final_message()
+    except anthropic.APIError as e:
+        return jsonify({"error": f"Claude API error: {str(e)[:200]}"}), 502
+    except Exception as e:
+        return jsonify({"error": f"Unexpected error calling Claude: {str(e)[:200]}"}), 500
 
     try:
         episode = json.loads(extract_json(response.content[0].text))
@@ -1024,8 +1041,13 @@ def generate():
         extra_headers={"anthropic-beta": "output-128k-2025-02-19"},
     )
 
+    # Use streaming — the SDK requires it once max_tokens × model-speed could exceed
+    # 10 minutes of wall time. Movie mode at 48k tokens on opus-4-7 hits that limit.
+    # Streaming behavior identical to .create() from our perspective: we still want
+    # the full message at the end; we just accumulate via the stream context manager.
     try:
-        response = client.messages.create(**create_kwargs)
+        with client.messages.stream(**create_kwargs) as stream:
+            response = stream.get_final_message()
     except anthropic.APIError as e:
         return jsonify({"error": f"Claude API error: {str(e)[:200]}"}), 502
     except Exception as e:
