@@ -1411,11 +1411,14 @@ _WAN22_NEGATIVE_PROMPT = (
 
 def _comfy_workflow_wan22_i2v(image_filename: str, prompt: str, seed: int,
                               width: int = 1280, height: int = 704,
-                              length: int = 121) -> dict:
+                              length: int = 49) -> dict:
     """Build the API-format graph ComfyUI's /prompt endpoint expects.
 
-    length=121 frames at 24fps ≈ 5 seconds. The Wan22ImageToVideoLatent node
-    requires length to satisfy (length - 1) % 4 == 0, so we stick to 121 or 49.
+    length=49 frames at 24fps ≈ 2 sec clips. We used to do 121 (5 sec) but
+    that crashed Render's 512MB free-tier worker: MoviePy holds each clip's
+    frames in RAM and 3 × 5-sec × 720p clips overflowed memory mid-export.
+    49 frames cuts per-clip memory to ~140MB so a 15-scene movie fits.
+    Constraint: (length - 1) %% 4 == 0, so valid values are 49, 81, 121, 161.
     """
     clean = (prompt or "")[:380].strip()
     return {
