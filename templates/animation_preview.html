@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AnimeForge — Live Animation Preview</title>
+<meta name="description" content="Live anime-style fighter animation demo. Themed across 10 anime visual modes — dash, punch, projectile blast, impact burst, camera shake." />
+
+<!--
+  How this page works:
+    - Tailwind v3 CDN (JIT) for utility classes inc. arbitrary-value syntax like w-[58px]
+    - React 19 + framer-motion 11 via esm.sh ES modules
+    - Babel standalone compiles the JSX inline at page-load time (no build step needed
+      because AnimeForge has no JS build pipeline — it's a Flask template repo)
+
+  Justen pasted this code originally targeting create-react-app / Vite. Since AnimeForge
+  is a server-rendered Flask app, the CDN+Babel trick is the lowest-friction way to drop
+  his React component into the existing template repo without spinning up a sub-project.
+-->
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  /* The "burst" 16-pointed star used by ImpactBurst. From Justen's reference. */
+  .clip-burst {
+    clip-path: polygon(
+      50% 0%,  60% 28%, 88% 12%, 72% 40%, 100% 50%, 72% 60%, 88% 88%, 60% 72%,
+      50% 100%, 40% 72%, 12% 88%, 28% 60%, 0% 50%, 28% 40%, 12% 12%, 40% 28%
+    );
+  }
+  html, body { background:#000; color:#fff; min-height:100vh; }
+  body { font-family: ui-sans-serif, system-ui, sans-serif; }
+</style>
+
+<script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.24/babel.min.js"></script>
+</head>
+<body>
+
+<!-- Tiny back-link so users can return to AnimeForge -->
+<div class="fixed top-4 right-4 z-[200] flex gap-2">
+  <a href="/" class="px-3 py-2 rounded-xl text-xs bg-black/70 border border-white/30 hover:bg-white/10 transition">← Back to AnimeForge</a>
+</div>
+
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react" data-type="module">
+import React, { useEffect, useState } from 'https://esm.sh/react@19'
+import { createRoot } from 'https://esm.sh/react-dom@19/client'
+import { motion, AnimatePresence } from 'https://esm.sh/framer-motion@11'
+
+const visualStyles = {
+  demon: {
+    label: 'Elemental Sword Anime',
+    bg: 'from-red-950 via-black to-orange-950',
+    sky: 'from-red-900 to-black',
+    aura: 'bg-orange-400',
+    energy: 'from-yellow-200 via-orange-400 to-red-600',
+    fighter1: 'from-red-500 to-orange-800',
+    fighter2: 'from-slate-200 to-red-700',
+    accent: 'text-orange-300',
+  },
+  spirit: {
+    label: 'Soft Spirit Fantasy',
+    bg: 'from-emerald-950 via-sky-950 to-teal-950',
+    sky: 'from-sky-300 to-emerald-300',
+    aura: 'bg-emerald-300',
+    energy: 'from-white via-emerald-200 to-teal-400',
+    fighter1: 'from-emerald-300 to-teal-700',
+    fighter2: 'from-pink-200 to-purple-400',
+    accent: 'text-emerald-200',
+  },
+  cyberpunk: {
+    label: 'Cyberpunk Anime',
+    bg: 'from-black via-fuchsia-950 to-cyan-950',
+    sky: 'from-black to-cyan-950',
+    aura: 'bg-cyan-400',
+    energy: 'from-cyan-100 via-blue-400 to-fuchsia-500',
+    fighter1: 'from-cyan-400 to-blue-900',
+    fighter2: 'from-fuchsia-400 to-purple-950',
+    accent: 'text-cyan-300',
+  },
+  curse: {
+    label: 'Occult Battle Anime',
+    bg: 'from-black via-purple-950 to-indigo-950',
+    sky: 'from-purple-950 to-black',
+    aura: 'bg-violet-500',
+    energy: 'from-violet-200 via-purple-500 to-black',
+    fighter1: 'from-violet-400 to-black',
+    fighter2: 'from-indigo-400 to-purple-950',
+    accent: 'text-violet-300',
+  },
+  titan: {
+    label: 'Giant War Anime',
+    bg: 'from-stone-950 via-orange-950 to-black',
+    sky: 'from-orange-200 to-stone-600',
+    aura: 'bg-amber-400',
+    energy: 'from-white via-amber-400 to-orange-700',
+    fighter1: 'from-amber-400 to-stone-800',
+    fighter2: 'from-red-500 to-stone-950',
+    accent: 'text-amber-300',
+  },
+  slice: {
+    label: 'Slice Of Life Anime',
+    bg: 'from-pink-950 via-rose-900 to-orange-900',
+    sky: 'from-orange-200 to-pink-300',
+    aura: 'bg-pink-300',
+    energy: 'from-white via-pink-200 to-orange-300',
+    fighter1: 'from-pink-300 to-rose-600',
+    fighter2: 'from-blue-300 to-indigo-600',
+    accent: 'text-pink-200',
+  },
+  aura: {
+    label: 'Aura Martial Arts Anime',
+    bg: 'from-blue-950 via-yellow-950 to-orange-950',
+    sky: 'from-blue-700 to-yellow-300',
+    aura: 'bg-yellow-300',
+    energy: 'from-white via-yellow-300 to-orange-500',
+    fighter1: 'from-yellow-300 to-orange-700',
+    fighter2: 'from-blue-400 to-indigo-900',
+    accent: 'text-yellow-200',
+  },
+  dark: {
+    label: 'Dark Fantasy Anime',
+    bg: 'from-black via-slate-950 to-purple-950',
+    sky: 'from-slate-900 to-black',
+    aura: 'bg-purple-500',
+    energy: 'from-purple-200 via-violet-500 to-black',
+    fighter1: 'from-purple-500 to-black',
+    fighter2: 'from-slate-300 to-slate-900',
+    accent: 'text-purple-300',
+  },
+  shonen: {
+    label: 'Shonen Battle Anime',
+    bg: 'from-red-950 via-blue-950 to-black',
+    sky: 'from-blue-500 to-red-400',
+    aura: 'bg-blue-400',
+    energy: 'from-white via-blue-300 to-red-500',
+    fighter1: 'from-blue-400 to-blue-900',
+    fighter2: 'from-red-400 to-red-950',
+    accent: 'text-blue-300',
+  },
+  isekai: {
+    label: 'Isekai Fantasy Anime',
+    bg: 'from-indigo-950 via-emerald-950 to-black',
+    sky: 'from-indigo-400 to-emerald-300',
+    aura: 'bg-teal-300',
+    energy: 'from-white via-teal-300 to-indigo-500',
+    fighter1: 'from-teal-300 to-emerald-800',
+    fighter2: 'from-indigo-300 to-purple-800',
+    accent: 'text-teal-200',
+  },
+}
+
+function App() {
+  const [styleKey, setStyleKey] = useState('shonen')
+  const [action, setAction] = useState('idle')
+  const [projectile, setProjectile] = useState(false)
+  const [impact, setImpact] = useState(false)
+  const [shake, setShake] = useState(false)
+
+  const theme = visualStyles[styleKey]
+
+  useEffect(() => {
+    // Auto-loop the fight beat: dash → punch → impact → blast → projectile → impact + shake → reset.
+    // Each phase nudges different state pieces; the cycle re-runs every 5.2 sec.
+    const loop = setInterval(() => {
+      setAction('dash')
+      setTimeout(() => setAction('punch'), 900)
+      setTimeout(() => setImpact(true), 1200)
+      setTimeout(() => setImpact(false), 1650)
+      setTimeout(() => setAction('blast'), 2100)
+      setTimeout(() => setProjectile(true), 2250)
+      setTimeout(() => { setProjectile(false); setImpact(true); setShake(true) }, 3100)
+      setTimeout(() => { setImpact(false); setShake(false); setAction('idle') }, 3700)
+    }, 5200)
+    return () => clearInterval(loop)
+  }, [])
+
+  return (
+    <main className={`min-h-screen bg-gradient-to-br ${theme.bg} text-white overflow-hidden`}>
+      {/* Style picker — clicking re-themes the whole scene immediately */}
+      <div className="absolute top-4 left-4 z-50 flex flex-wrap gap-2 max-w-5xl">
+        {Object.entries(visualStyles).map(([key, item]) => (
+          <button
+            key={key}
+            onClick={() => setStyleKey(key)}
+            className={`px-3 py-2 rounded-xl text-xs border ${
+              key === styleKey ? 'bg-white text-black' : 'bg-black/50 border-white/20'
+            }`}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+
+      <motion.section
+        animate={shake ? { x: [0, -12, 12, -8, 8, 0] } : { x: 0 }}
+        transition={{ duration: 0.35 }}
+        className="relative mx-auto mt-20 w-[min(96vw,1280px)] aspect-video rounded-3xl overflow-hidden border border-white/20 shadow-2xl bg-black"
+      >
+        <ArenaBackground theme={theme} styleKey={styleKey} />
+        <HUD theme={theme} />
+
+        <Fighter side="left"  theme={theme} action={action}              xBase={180} facing="right" primary />
+        <Fighter side="right" theme={theme} action={impact ? 'hit' : 'idle'} xBase={900} facing="left" />
+
+        <AnimatePresence>{projectile && <Projectile theme={theme} />}</AnimatePresence>
+        <AnimatePresence>{impact && <ImpactBurst theme={theme} />}</AnimatePresence>
+
+        <div className="absolute left-0 right-0 bottom-[86px] h-2 bg-black/70" />
+        <div className="absolute bottom-0 left-0 right-0 h-[90px] bg-gradient-to-t from-black via-green-950 to-green-800" />
+
+        <Controls />
+      </motion.section>
+    </main>
+  )
+}
+
+function ArenaBackground({ theme, styleKey }) {
+  return (
+    <div className="absolute inset-0">
+      <div className={`absolute inset-0 bg-gradient-to-b ${theme.sky}`} />
+
+      <motion.div
+        className="absolute inset-0 opacity-30"
+        animate={{ x: [0, -60, 0] }}
+        transition={{ duration: 18, repeat: Infinity, ease: 'linear' }}
+      >
+        <div className="absolute bottom-[170px] left-10 w-48 h-72 bg-white/10 rounded-t-full" />
+        <div className="absolute bottom-[170px] left-80 w-72 h-96 bg-white/10 rounded-t-full" />
+        <div className="absolute bottom-[170px] right-24 w-64 h-80 bg-white/10 rounded-t-full" />
+      </motion.div>
+
+      {styleKey === 'cyberpunk' && (
+        <div className="absolute inset-0 opacity-50 bg-[linear-gradient(rgba(34,211,238,.18)_1px,transparent_1px),linear-gradient(90deg,rgba(236,72,153,.18)_1px,transparent_1px)] bg-[size:42px_42px]" />
+      )}
+
+      {styleKey === 'spirit' && (
+        <>
+          <Cloud x="10%" y="18%" />
+          <Cloud x="55%" y="10%" />
+          <Cloud x="75%" y="28%" />
+        </>
+      )}
+
+      {styleKey === 'titan' && (
+        <div className="absolute bottom-[145px] left-0 right-0 h-40 bg-stone-700/70 border-t-8 border-stone-300/40">
+          {[...Array(12)].map((_, i) => (
+            <div key={i} className="absolute bottom-0 w-16 h-40 bg-stone-900/50" style={{ left: i * 120 }} />
+          ))}
+        </div>
+      )}
+
+      <motion.div
+        className="absolute bottom-[90px] left-0 right-0 h-24 bg-green-700/40"
+        animate={{ x: [0, -80, 0] }}
+        transition={{ duration: 8, repeat: Infinity, ease: 'linear' }}
+      >
+        {[...Array(60)].map((_, i) => (
+          <div
+            key={i}
+            className="absolute bottom-0 w-1 bg-green-200/60 rounded-full"
+            style={{ left: `${i * 35}px`, height: `${20 + (i % 5) * 8}px` }}
+          />
+        ))}
+      </motion.div>
+    </div>
+  )
+}
+
+function HUD({ theme }) {
+  return (
+    <div className="absolute top-4 left-6 right-6 z-30">
+      <div className="grid grid-cols-[1fr_120px_1fr] gap-4 items-center">
+        <HealthBar align="left" value="82" theme={theme} />
+        <div className="text-center">
+          <div className="mx-auto w-24 h-16 rounded-2xl bg-black/80 border border-white/30 flex items-center justify-center text-4xl font-black">
+            77
+          </div>
+        </div>
+        <HealthBar align="right" value="64" theme={theme} />
+      </div>
+
+      <div className="mt-2 grid grid-cols-2 gap-8">
+        <Meter value="68" />
+        <Meter value="41" />
+      </div>
+    </div>
+  )
+}
+
+function HealthBar({ value, align, theme }) {
+  return (
+    <div>
+      <div className={`mb-1 text-xs ${align === 'right' ? 'text-right' : ''}`}>
+        {align === 'left' ? 'PLAYER 1' : 'PLAYER 2'}
+      </div>
+      <div className="h-6 bg-black/80 border border-white/30 rounded-full overflow-hidden">
+        <div
+          className={`h-full bg-gradient-to-r ${theme.energy}`}
+          style={{ width: `${value}%`, marginLeft: align === 'right' ? 'auto' : 0 }}
+        />
+      </div>
+    </div>
+  )
+}
+
+function Meter({ value }) {
+  return (
+    <div className="h-3 bg-black/70 border border-white/20 rounded-full overflow-hidden">
+      <div className="h-full bg-blue-400" style={{ width: `${value}%` }} />
+    </div>
+  )
+}
+
+// Fighter — note: Justen's original used Tailwind utility classes like w-58, h-110, etc.
+// Those aren't valid in default Tailwind v3 (the scale stops at w-96 = 24rem). I switched
+// the body-part sizes to arbitrary-value syntax (w-[58px], h-[110px]) so JIT picks them up.
+function Fighter({ theme, action, xBase, facing, primary }) {
+  const scaleX = facing === 'left' ? -1 : 1
+
+  const variants = {
+    idle:  { x: xBase, y: 0 },
+    dash:  { x: xBase + 230, y: 0 },
+    punch: { x: xBase + 250, y: 0 },
+    blast: { x: xBase + 225, y: 0 },
+    hit:   { x: xBase + 18,  y: 0, rotate: [0, -2, 2, 0] },
+  }
+
+  const bodyGrad = primary ? theme.fighter1 : theme.fighter2
+
+  return (
+    <motion.div
+      className="absolute bottom-[90px] z-20 w-[150px] h-[300px]"
+      animate={variants[action] || variants.idle}
+      transition={{ duration: action === 'dash' ? 0.45 : 0.22, ease: 'easeOut' }}
+      style={{ transformOrigin: 'bottom center' }}
+    >
+      <motion.div
+        className="relative w-full h-full"
+        animate={{ y: [0, -4, 0] }}
+        transition={{ duration: 1.2, repeat: Infinity }}
+        style={{ scaleX }}
+      >
+        {/* Aura glow */}
+        <motion.div
+          className={`absolute left-1/2 top-20 -translate-x-1/2 w-44 h-44 rounded-full ${theme.aura} blur-3xl opacity-35`}
+          animate={{ scale: [0.8, 1.2, 0.8] }}
+          transition={{ duration: 1.4, repeat: Infinity }}
+        />
+
+        {/* Head */}
+        <div className={`absolute left-[48px] top-[26px] w-[58px] h-[58px] rounded-full bg-gradient-to-b ${bodyGrad} border-4 border-black`} />
+
+        {/* Torso */}
+        <div className={`absolute left-[42px] top-[82px] w-[70px] h-[110px] rounded-t-full bg-gradient-to-b ${bodyGrad} border-4 border-black`} />
+
+        {/* Back arm */}
+        <motion.div
+          className={`absolute left-[20px] top-[100px] w-[24px] h-[72px] rounded-full bg-gradient-to-b ${bodyGrad} border-4 border-black origin-top`}
+          animate={action === 'punch' ? { rotate: [-20, -80, -10] } : { rotate: [-12, -18, -12] }}
+          transition={{ duration: action === 'punch' ? 0.25 : 1.2, repeat: action === 'punch' ? 0 : Infinity }}
+        />
+
+        {/* Front arm (the punching one) */}
+        <motion.div
+          className={`absolute left-[98px] top-[100px] w-[28px] h-[72px] rounded-full bg-gradient-to-b ${bodyGrad} border-4 border-black origin-top`}
+          animate={action === 'punch' ? { rotate: [20, 95, 10] } : { rotate: [12, 18, 12] }}
+          transition={{ duration: action === 'punch' ? 0.25 : 1.2, repeat: action === 'punch' ? 0 : Infinity }}
+        />
+
+        {/* Legs */}
+        <div className="absolute left-[50px] top-[180px] w-[24px] h-[110px] bg-black rounded-full origin-top rotate-12" />
+        <div className="absolute left-[88px] top-[180px] w-[24px] h-[110px] bg-black rounded-full origin-top -rotate-12" />
+
+        {/* Feet */}
+        <div className="absolute left-[36px] bottom-0 w-[46px] h-[18px] bg-black rounded-full" />
+        <div className="absolute left-[84px] bottom-0 w-[46px] h-[18px] bg-black rounded-full" />
+
+        {/* Dash speed lines trailing behind */}
+        {action === 'dash' && (
+          <div className="absolute left-[-130px] top-[90px]">
+            {[...Array(8)].map((_, i) => (
+              <div
+                key={i}
+                className={`absolute h-2 rounded-full bg-gradient-to-r ${theme.energy}`}
+                style={{ width: 120 + i * 18, top: i * 18, opacity: 0.65 }}
+              />
+            ))}
+          </div>
+        )}
+
+        {/* Blast charge ball */}
+        {action === 'blast' && (
+          <motion.div
+            className={`absolute left-[128px] top-[110px] w-24 h-24 rounded-full bg-gradient-to-r ${theme.energy} blur-sm`}
+            animate={{ scale: [0.4, 1.3, 0.6], opacity: [0, 1, 0] }}
+            transition={{ duration: 0.55 }}
+          />
+        )}
+      </motion.div>
+    </motion.div>
+  )
+}
+
+function Projectile({ theme }) {
+  return (
+    <motion.div
+      initial={{ x: 445, y: 290, opacity: 1, scale: 0.8 }}
+      animate={{ x: 900, y: 290, opacity: 1, scale: 1.2 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.75, ease: 'linear' }}
+      className="absolute z-30"
+    >
+      <div className={`w-40 h-16 rounded-full bg-gradient-to-r ${theme.energy} shadow-[0_0_40px_rgba(255,255,255,.9)]`} />
+      <div className={`absolute right-20 top-4 w-80 h-8 rounded-full bg-gradient-to-r from-transparent ${theme.aura} blur-md opacity-70`} />
+    </motion.div>
+  )
+}
+
+function ImpactBurst({ theme }) {
+  return (
+    <motion.div
+      initial={{ scale: 0.2, opacity: 0, rotate: 0 }}
+      animate={{ scale: [0.2, 1.4, 1], opacity: [0, 1, 0], rotate: 25 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.45 }}
+      className="absolute z-40 left-[880px] top-[300px]"
+    >
+      <div className={`w-56 h-56 bg-gradient-to-r ${theme.energy} clip-burst shadow-[0_0_50px_rgba(255,255,255,.9)]`} />
+      <div className="absolute inset-10 bg-white rounded-full blur-sm" />
+    </motion.div>
+  )
+}
+
+function Cloud({ x, y }) {
+  return (
+    <motion.div
+      className="absolute w-48 h-20 bg-white/40 rounded-full blur-sm"
+      style={{ left: x, top: y }}
+      animate={{ x: [0, 30, 0] }}
+      transition={{ duration: 8, repeat: Infinity }}
+    />
+  )
+}
+
+function Controls() {
+  return (
+    <div className="absolute bottom-3 left-4 z-50 text-xs bg-black/60 border border-white/20 rounded-xl p-3 text-white/80">
+      Demo loop active: dash, punch, impact, blast, camera shake
+    </div>
+  )
+}
+
+createRoot(document.getElementById('root')).render(<App />)
+</script>
+
+</body>
+</html>

@@ -1058,6 +1058,18 @@ def generate():
     return jsonify(story)
 
 
+@app.route("/animation-preview")
+def animation_preview():
+    """
+    Standalone showcase page that runs Justen's React fighter animation demo.
+    Loaded via React + framer-motion + Babel JSX on the CDN so it can live
+    inside this Flask template repo without a build step. Public — no auth gate,
+    since the goal is to let visitors see the in-motion anime style before
+    creating an account.
+    """
+    return render_template("animation_preview.html")
+
+
 @app.route("/styles")
 def styles_list():
     """Public list for the frontend style picker. No auth required —
