@@ -164,7 +164,7 @@ def _fal_image(prompt, width, height, model="hunyuan", seed=None):
       - "seedream" → fal-ai/bytedance/seedream/v4/text-to-image  (best general / cinematic)
     Cost is roughly $0.04 per image at the time of writing.
     """
-    if not FAL_KEY:
+    if not FAL_KEY or _fal_locked():
         return None
     import fal_client
 
@@ -200,7 +200,12 @@ def _fal_image(prompt, width, height, model="hunyuan", seed=None):
                 if r.status_code == 200:
                     return r.content
     except Exception as exc:
-        print(f"[fal-image] {model} failed: {exc}", flush=True)
+        msg = str(exc)
+        print(f"[fal-image] {model} failed: {msg}", flush=True)
+        # Trip the circuit breaker for known unrecoverable conditions so the
+        # rest of the export doesn't pay the API latency on every scene.
+        if "User is locked" in msg or "Exhausted balance" in msg:
+            _mark_fal_locked(f"image gen — {msg[:80]}")
     return None
 
 
@@ -209,6 +214,20 @@ def _fal_image(prompt, width, height, model="hunyuan", seed=None):
 # Keyed on (prompt, seed, w, h). Cleared whole when it crosses ~200 entries.
 _SCENE_ART_CACHE: dict = {}
 _SCENE_ART_CACHE_MAX = 200
+
+# Fal.ai outage circuit-breaker. When we see "User is locked" (exhausted balance)
+# or repeated network errors, mark fal.ai unavailable for 10 minutes so subsequent
+# calls skip the failing path immediately rather than each one paying ~1 sec of
+# failed API latency. Resets automatically after the cooldown.
+_FAL_LOCKED_UNTIL: float = 0.0
+
+def _fal_locked() -> bool:
+    return time.time() < _FAL_LOCKED_UNTIL
+
+def _mark_fal_locked(reason: str = "") -> None:
+    global _FAL_LOCKED_UNTIL
+    _FAL_LOCKED_UNTIL = time.time() + 600
+    print(f"[fal] circuit open for 10 min — {reason}", flush=True)
 
 
 def paypal_base():
@@ -1282,7 +1301,7 @@ def animate_scene_fal(img_path, prompt, tmp_dir, scene_idx, job, model="wan"):
     movie export costs ~$8.40 in fal calls; at Wan pricing it's ~$6.00. We
     default to the cheaper model and only fall back to Kling on Wan failure.
     """
-    if not FAL_KEY:
+    if not FAL_KEY or _fal_locked():
         return None
 
     import fal_client
@@ -1336,7 +1355,10 @@ def animate_scene_fal(img_path, prompt, tmp_dir, scene_idx, job, model="wan"):
         job["elapsed_seconds"] = int(time.time() - job["start_time"])
         return out_path
 
-    except Exception:
+    except Exception as exc:
+        msg = str(exc)
+        if "User is locked" in msg or "Exhausted balance" in msg:
+            _mark_fal_locked(f"animation — {msg[:80]}")
         return None
 
 
@@ -1427,24 +1449,36 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
                 Image.new("RGB", (W, H), (5, 10, 25)).save(img_path, "JPEG")
 
             # ── Step 2: Animate ──
-            # Two animation paths now:
-            #   anim_model="local"  → FFmpeg cinematic zoompan (free, mood-driven)
+            # Three animation paths:
             #   anim_model="wan"    → fal.ai Wan 2.5 (cheap, ~$0.25/clip)
             #   anim_model="kling"  → fal.ai Kling 1.6 Pro (premium, ~$0.35/clip)
-            # Tier gating happens in /start-export; here we just honor what was sent.
+            #   anim_model="local"  → FFmpeg cinematic zoompan (free but SLOW on
+            #                          Render free tier — ~60s/scene shared vCPU)
+            #
+            # When fal.ai is the chosen path and fails (balance exhausted, network),
+            # we *don't* fall back to local FFmpeg anymore — it's so slow on shared
+            # CPU that users think the export hung. Instead we use the static image
+            # for that scene and surface a clear message so the user knows fal.ai
+            # is the gating issue. Total export time on free tier drops from
+            # 5-10 min back to ~1-2 min when balance is the only blocker.
             vid_path = None
             if animate:
-                if anim_model in ("wan", "kling") and FAL_KEY:
+                if anim_model in ("wan", "kling") and FAL_KEY and not _fal_locked():
                     vid_path = animate_scene_fal(img_path, raw_prompt, tmp, i, job, model=anim_model)
-                    # If the paid model fails, fall back to free local motion rather than fail the whole export
-                    if not vid_path:
-                        vid_path = animate_scene_local(img_path, sc, tmp, i, job)
-                else:
+                    if vid_path:
+                        job["message"] = f"Scene {i+1}/{n} — {anim_model} animation done ✓"
+                    else:
+                        job["message"] = f"Scene {i+1}/{n} — fal.ai unavailable (top up balance for real motion). Using static art."
+                elif anim_model == "local":
+                    # User explicitly picked local — honor it even though it's slow.
                     vid_path = animate_scene_local(img_path, sc, tmp, i, job)
-                if vid_path:
-                    job["message"] = f"Scene {i+1}/{n} — animation done ✓"
-                else:
-                    job["message"] = f"Scene {i+1}/{n} — animation unavailable, using image"
+                    if vid_path:
+                        job["message"] = f"Scene {i+1}/{n} — zoom motion ready ✓"
+                    else:
+                        job["message"] = f"Scene {i+1}/{n} — animation failed, using static art"
+                elif _fal_locked():
+                    job["message"] = f"Scene {i+1}/{n} — fal.ai balance exhausted, using static art"
+                # Else: no FAL_KEY and not local — just use static
 
             # ── Step 3: Build TTS audio ──
             audio_path = os.path.join(tmp, f"audio_{i}.mp3")
