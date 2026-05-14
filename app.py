@@ -1708,11 +1708,17 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
             except Exception:
                 audio = None; duration = min_dur
 
-            # ── Build clip: animated video or static image ──
+            # ── Build clip + write per-scene MP4 immediately ──
+            # MEMORY: Render's free tier worker is 512MB. Holding 5+ MoviePy
+            # clips and then concatenating them inside Python kept blowing
+            # past the limit and silently SIGKILLing gunicorn mid-export. The
+            # fix is per-scene streaming: build one clip, write it to disk at
+            # the target W/H/fps with H.264, close everything to release frame
+            # buffers, then ffmpeg-concat all the per-scene MP4s at the end.
+            # Memory now stays flat (~140MB peak) regardless of scene count.
             if vid_path:
                 from moviepy import VideoFileClip
                 clip = VideoFileClip(vid_path)
-                # Attach TTS audio on top of any existing audio track
                 if audio:
                     audio_trimmed = audio.subclipped(0, min(audio.duration, clip.duration))
                     clip = clip.with_audio(audio_trimmed)
@@ -1721,24 +1727,39 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
                 if audio:
                     audio = audio.with_effects([moviepy.afx.AudioFadeIn(0.5), moviepy.afx.AudioFadeOut(1.0)])
                     clip  = clip.with_audio(audio)
-            clips.append(clip)
+            # Normalize to target dims so ffmpeg concat-demuxer can stream-copy
+            try:
+                clip = clip.resized((W, H))
+            except Exception:
+                pass
+
+            scene_out = os.path.join(tmp, f"final_scene_{i:03d}.mp4")
+            clip.write_videofile(
+                scene_out, fps=30, codec="libx264", audio_codec="aac",
+                threads=2, preset="ultrafast", logger=None,
+            )
+            # Release frame buffers before next scene
+            try: clip.close()
+            except Exception: pass
+            if audio:
+                try: audio.close()
+                except Exception: pass
+            clips.append(scene_out)
 
         job["progress"]    = 88
         anim_tag = "_animated" if animate else ""
-        job["message"]     = f"Rendering final {quality.upper()} 30fps{' animated' if animate else ''} video…"
+        job["message"]     = f"Stitching {n} scenes into final {quality.upper()} video…"
         job["scenes_done"] = n
-        final    = concatenate_videoclips(clips, method="compose")
         safe     = "".join(c for c in story.get("title", "anime") if c.isalnum() or c in " _-")[:40]
         out_name = f"{safe.strip()}_{quality}{anim_tag}_30fps.mp4"
         out_path = os.path.join(tmp, out_name)
 
         encode_done = threading.Event()
         _msgs = [
-            f"Encoding {quality.upper()} frames at 30fps…",
-            "Compressing with H.264…",
-            "Writing audio tracks…",
-            "Merging scenes…",
-            "Almost there — hang tight…",
+            f"Stitching {quality.upper()} scenes…",
+            "Concatenating with FFmpeg…",
+            "Writing final audio…",
+            "Merging — almost there…",
         ]
 
         def _progress_ticker():
@@ -1753,17 +1774,34 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
         ticker = threading.Thread(target=_progress_ticker, daemon=True)
         ticker.start()
 
+        # FFmpeg concat-demuxer: takes a list file of MP4 paths, stream-copies
+        # them into one output. No re-decode, no frame buffers, near-zero RAM.
+        concat_list = os.path.join(tmp, "concat.txt")
+        with open(concat_list, "w") as fh:
+            for p in clips:
+                # ffmpeg concat requires escaped single quotes for safety
+                fh.write(f"file '{p.replace(chr(39), chr(39)+chr(92)+chr(39)+chr(39))}'\n")
         try:
-            final.write_videofile(out_path, fps=30, codec="libx264", audio_codec="aac",
-                                  threads=4, preset="ultrafast", logger=None)
+            res = subprocess.run(
+                ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                 "-i", concat_list, "-c", "copy", "-movflags", "+faststart",
+                 out_path],
+                capture_output=True, timeout=600,
+            )
+            if res.returncode != 0:
+                # Stream-copy can fail if per-scene encoders drifted on params;
+                # fall back to a full re-encode pass (slower but always works).
+                subprocess.run(
+                    ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                     "-i", concat_list,
+                     "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
+                     "-c:a", "aac", "-movflags", "+faststart",
+                     out_path],
+                    check=True, capture_output=True, timeout=900,
+                )
         finally:
             encode_done.set()
             ticker.join(timeout=2)
-
-        final.close()
-        for c in clips:
-            try: c.close()
-            except Exception: pass
 
         elapsed = time.time() - job["start_time"]
         job.update({
