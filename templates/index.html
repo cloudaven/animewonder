@@ -1369,15 +1369,15 @@
     el.innerHTML = items.map(p=>{
       const type = (p.type||'episode').toLowerCase();
       const score = matchScore(p.title||'');
-      return `<div class="anime-card">
+      return `<div class="anime-card" onclick="loadProject(${p.id})" style="cursor:pointer">
         <div class="anime-thumb">
           <img src="${posterUrl(p.title,p.genre,simpleHash(p.title||'x'))}" alt="" loading="lazy" onerror="this.style.opacity='.15'">
           <div class="anime-badge badge-${type}">${type.toUpperCase()}</div>
           <div class="anime-match">${score}% Match</div>
           <div class="anime-hover-panel">
             <div class="anime-play-row">
-              <button class="anime-play-btn" onclick="loadProject(${p.id})">▶</button>
-              <div class="anime-del-btn" onclick="deleteProject(${p.id},this.closest('.anime-card'))">✕</div>
+              <button class="anime-play-btn" onclick="event.stopPropagation();loadProject(${p.id})">▶</button>
+              <div class="anime-del-btn" onclick="event.stopPropagation();deleteProject(${p.id},this.closest('.anime-card'))">✕</div>
             </div>
             <div class="anime-hover-title">${escHtml(p.title||'Untitled')}</div>
             <div class="anime-hover-tags">
