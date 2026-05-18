@@ -71,8 +71,15 @@ if PAYPAL_MODE not in ("sandbox", "live"):
     raise SystemExit(f"Refusing to start: PAYPAL_MODE must be 'sandbox' or 'live', got {PAYPAL_MODE!r}.")
 if PAYPAL_MODE == "live" and not (PAYPAL_CLIENT_ID and PAYPAL_SECRET):
     raise SystemExit("Refusing to start: PAYPAL_MODE=live requires both PAYPAL_CLIENT_ID and PAYPAL_SECRET.")
-PAYPAL_PLAN_HUNTER = os.environ.get("PAYPAL_PLAN_HUNTER", "")
-PAYPAL_PLAN_MONARCH= os.environ.get("PAYPAL_PLAN_MONARCH", "")
+# Credit packs (one-time purchases, works with personal PayPal)
+PACK_HUNTER_CREDITS  = 20
+PACK_HUNTER_PRICE    = "9.99"
+PACK_MONARCH_CREDITS = 60
+PACK_MONARCH_PRICE   = "19.99"
+PACKS = {
+    "hunter":  {"credits": PACK_HUNTER_CREDITS,  "price": PACK_HUNTER_PRICE,  "tier": "hunter"},
+    "monarch": {"credits": PACK_MONARCH_CREDITS, "price": PACK_MONARCH_PRICE, "tier": "monarch"},
+}
 
 FAL_KEY = os.environ.get("FAL_KEY", "")
 
@@ -318,6 +325,7 @@ def init_db():
                 episodes_used         INTEGER NOT NULL DEFAULT 0,
                 period_month          TEXT    DEFAULT (strftime('%Y-%m','now')),
                 paypal_subscription_id TEXT,
+                credits               INTEGER NOT NULL DEFAULT 0,
                 created_at            TEXT    DEFAULT (datetime('now'))
             )""")
 
@@ -357,6 +365,11 @@ def init_db():
                 FOREIGN KEY (season_id) REFERENCES seasons(id) ON DELETE CASCADE
             )""")
 
+        # Migration: add credits column for existing deployments
+        try:
+            db.execute("ALTER TABLE users ADD COLUMN credits INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass  # column already exists
         db.commit()
 
 
@@ -366,6 +379,14 @@ def get_user(uid):
 
 
 def quota_check(user):
+    tier    = user["tier"] or "free"
+    credits = user["credits"] if "credits" in user.keys() else 0
+
+    # Paid users: credits are the currency. No monthly reset.
+    if tier in ("hunter", "monarch"):
+        return credits, credits, credits > 0  # used=credits_left, limit=same, allowed=has_any
+
+    # Free users: 2/month rolling window
     current = datetime.date.today().strftime("%Y-%m")
     if user["period_month"] != current:
         with get_db() as db:
@@ -375,7 +396,6 @@ def quota_check(user):
         used = 0
     else:
         used = user["episodes_used"]
-    tier  = user["tier"] or "free"
     limit = TIER_LIMITS.get(tier, 2)
     return used, limit, used < limit
 
@@ -442,52 +462,80 @@ def logout():
     return redirect(url_for("login"))
 
 
-# ── PayPal ─────────────────────────────────────────────────────────────────────
+# ── PayPal one-time credit packs ───────────────────────────────────────────────
+# Personal PayPal accounts can't create Subscription Plans — only Orders.
+# Instead of monthly subscriptions, users buy generation credit packs:
+#   Hunter Pack  — 20 generations / $9.99
+#   Monarch Pack — 60 generations / $19.99
+# Credits never expire. When they run out the user buys another pack.
 
-@app.route("/verify-paypal", methods=["POST"])
+@app.route("/create-paypal-order", methods=["POST"])
 @login_required
-def verify_paypal():
-    data   = request.json or {}
-    sub_id = data.get("subscription_id","")
-    plan   = data.get("plan","hunter")
+def create_paypal_order():
+    pack = (request.json or {}).get("pack", "")
+    if pack not in PACKS:
+        return jsonify({"error": "Invalid pack"}), 400
     if not PAYPAL_CLIENT_ID:
-        return jsonify({"error":"PayPal not configured."}), 500
+        return jsonify({"error": "PayPal not configured"}), 500
+    p = PACKS[pack]
     try:
         token = paypal_token()
-        sub   = http.get(f"{paypal_base()}/v1/billing/subscriptions/{sub_id}",
-                         headers={"Authorization":f"Bearer {token}"}, timeout=15).json()
+        r = http.post(
+            f"{paypal_base()}/v2/checkout/orders",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={
+                "intent": "CAPTURE",
+                "purchase_units": [{
+                    "amount": {"currency_code": "USD", "value": p["price"]},
+                    "description": f"AnimeForge {pack.title()} Pack — {p['credits']} story generations",
+                }],
+            },
+            timeout=15,
+        )
+        r.raise_for_status()
+        return jsonify({"order_id": r.json().get("id")})
     except Exception as e:
-        return jsonify({"error":str(e)}), 500
-    if sub.get("status") == "ACTIVE":
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/capture-paypal-order", methods=["POST"])
+@login_required
+def capture_paypal_order():
+    data     = request.json or {}
+    order_id = data.get("order_id", "")
+    pack     = data.get("pack", "")
+    if pack not in PACKS or not order_id:
+        return jsonify({"error": "Invalid request"}), 400
+    if not PAYPAL_CLIENT_ID:
+        return jsonify({"error": "PayPal not configured"}), 500
+    try:
+        token = paypal_token()
+        r = http.post(
+            f"{paypal_base()}/v2/checkout/orders/{order_id}/capture",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={},
+            timeout=15,
+        )
+        r.raise_for_status()
+        result = r.json()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    if result.get("status") == "COMPLETED":
+        p   = PACKS[pack]
         uid = session.get("user_id")
         with get_db() as db:
-            db.execute("UPDATE users SET tier=?, paypal_subscription_id=? WHERE id=?",
-                       (plan, sub_id, uid))
+            db.execute(
+                "UPDATE users SET tier=?, credits=credits+? WHERE id=?",
+                (p["tier"], p["credits"], uid),
+            )
             db.commit()
-        session["tier"] = plan
-        return jsonify({"success":True,"tier":plan})
-    return jsonify({"error":"Subscription not active yet."}), 400
-
-
-@app.route("/paypal-webhook", methods=["POST"])
-def paypal_webhook():
-    event    = request.json or {}
-    etype    = event.get("event_type","")
-    resource = event.get("resource",{})
-    sub_id   = resource.get("id") or resource.get("billing_agreement_id","")
-    if etype in ("BILLING.SUBSCRIPTION.CANCELLED","BILLING.SUBSCRIPTION.SUSPENDED","PAYMENT.SALE.DENIED"):
-        if sub_id:
-            with get_db() as db:
-                db.execute("UPDATE users SET tier='free' WHERE paypal_subscription_id=?",(sub_id,))
-                db.commit()
-    if etype == "BILLING.SUBSCRIPTION.ACTIVATED":
-        plan_id = resource.get("plan_id","")
-        tier    = "hunter" if plan_id == PAYPAL_PLAN_HUNTER else "monarch"
-        if sub_id:
-            with get_db() as db:
-                db.execute("UPDATE users SET tier=? WHERE paypal_subscription_id=?",(tier,sub_id))
-                db.commit()
-    return "", 200
+            user = db.execute("SELECT credits FROM users WHERE id=?", (uid,)).fetchone()
+        session["tier"] = p["tier"]
+        new_credits = user["credits"] if user else p["credits"]
+        return jsonify({"success": True, "tier": p["tier"],
+                        "credits_added": p["credits"], "credits_total": new_credits})
+    return jsonify({"error": f"Payment status: {result.get('status')}"}), 400
 
 
 # ── Upgrade page ────────────────────────────────────────────────────────────────
@@ -497,12 +545,16 @@ def paypal_webhook():
 def upgrade():
     user  = get_user(session["user_id"]) if session.get("user_id") else None
     tier  = "admin" if session.get("is_admin") else (user["tier"] if user else "free")
+    credits = (user["credits"] if user and "credits" in user.keys() else 0) if user else 0
     used, limit, _ = quota_check(user) if user else (0, 2, True)
     return render_template("upgrade.html", tier=tier, used=used, limit=limit,
+                           credits=credits,
                            email=session.get("email",""),
                            paypal_client_id=PAYPAL_CLIENT_ID,
-                           paypal_plan_hunter=PAYPAL_PLAN_HUNTER,
-                           paypal_plan_monarch=PAYPAL_PLAN_MONARCH)
+                           pack_hunter_credits=PACK_HUNTER_CREDITS,
+                           pack_hunter_price=PACK_HUNTER_PRICE,
+                           pack_monarch_credits=PACK_MONARCH_CREDITS,
+                           pack_monarch_price=PACK_MONARCH_PRICE)
 
 
 # ── Project persistence ────────────────────────────────────────────────────────
@@ -786,11 +838,16 @@ Create exactly 6 scenes. Keep it consistent with the series characters and world
                 db.execute("UPDATE seasons SET updated_at=? WHERE id=?", (now, season_id))
                 db.commit()
 
-    # Count against quota
+    # Count against quota / deduct credits
     if not session.get("is_admin") and session.get("user_id"):
+        uid  = session["user_id"]
+        u2   = get_user(uid)
+        tier2 = (u2["tier"] or "free") if u2 else "free"
         with get_db() as db:
-            db.execute("UPDATE users SET episodes_used=episodes_used+1 WHERE id=?",
-                       (session["user_id"],))
+            if tier2 in ("hunter", "monarch"):
+                db.execute("UPDATE users SET credits=MAX(0,credits-1) WHERE id=?", (uid,))
+            else:
+                db.execute("UPDATE users SET episodes_used=episodes_used+1 WHERE id=?", (uid,))
             db.commit()
 
     return jsonify(episode)
@@ -1146,9 +1203,14 @@ def generate():
     story["style"] = style_key
 
     if not session.get("is_admin") and session.get("user_id"):
+        uid  = session["user_id"]
+        user = get_user(uid)
+        tier = (user["tier"] or "free") if user else "free"
         with get_db() as db:
-            db.execute("UPDATE users SET episodes_used=episodes_used+1 WHERE id=?",
-                       (session["user_id"],))
+            if tier in ("hunter", "monarch"):
+                db.execute("UPDATE users SET credits=MAX(0,credits-1) WHERE id=?", (uid,))
+            else:
+                db.execute("UPDATE users SET episodes_used=episodes_used+1 WHERE id=?", (uid,))
             db.commit()
 
     return jsonify(story)
