@@ -1235,17 +1235,116 @@ def styles_list():
     return jsonify({"styles": styles_public(), "default": DEFAULT_STYLE})
 
 
+def _comfy_workflow_txt2img(prompt: str, neg: str, w: int, h: int, seed: int) -> dict:
+    """ComfyUI API-format workflow for Animagine XL text-to-image.
+
+    Nodes: CheckpointLoaderSimple → CLIPTextEncode×2 → EmptyLatentImage
+           → KSampler → VAEDecode → SaveImage
+    """
+    return {
+        "1": {"class_type": "CheckpointLoaderSimple",
+              "inputs": {"ckpt_name": "animagine-xl-3.1.safetensors"}},
+        "2": {"class_type": "CLIPTextEncode",
+              "inputs": {"clip": ["1", 1], "text": prompt}},
+        "3": {"class_type": "CLIPTextEncode",
+              "inputs": {"clip": ["1", 1], "text": neg}},
+        "4": {"class_type": "EmptyLatentImage",
+              "inputs": {"width": w, "height": h, "batch_size": 1}},
+        "5": {"class_type": "KSampler",
+              "inputs": {"model": ["1", 0], "positive": ["2", 0],
+                         "negative": ["3", 0], "latent_image": ["4", 0],
+                         "seed": seed, "steps": 28, "cfg": 7.0,
+                         "sampler_name": "dpmpp_2m", "scheduler": "karras",
+                         "denoise": 1.0}},
+        "6": {"class_type": "VAEDecode",
+              "inputs": {"samples": ["5", 0], "vae": ["1", 2]}},
+        "7": {"class_type": "SaveImage",
+              "inputs": {"images": ["6", 0], "filename_prefix": "animeforge_img"}},
+    }
+
+
+def _comfy_image(prompt: str, w: int, h: int, seed: int) -> bytes | None:
+    """Generate an image via local ComfyUI (Animagine XL).
+
+    Returns JPEG bytes on success, None on failure (circuit breaker trips).
+    Falls back gracefully to Pollinations if the model isn't loaded yet.
+    """
+    if not COMFY_LOCAL_URL or _comfy_locked():
+        return None
+
+    # Quick check: is the model file present? Skip if not yet downloaded.
+    model_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)).replace("anime_app", ""),
+        "ai", "ComfyUI_windows_portable", "ComfyUI", "models", "checkpoints",
+        "animagine-xl-3.1.safetensors",
+    )
+    # Also try the path relative to the script (production Render won't have this)
+    if not os.path.exists(model_path):
+        return None
+
+    neg = ("worst quality, low quality, jpeg artifacts, ugly, duplicate, "
+           "morbid, mutilated, extra fingers, mutated hands, poorly drawn hands, "
+           "poorly drawn face, mutation, blurry, bad anatomy, bad proportions, watermark")
+    seed_val = int(seed) % 2147483647
+    # Snap to SDXL-friendly multiples of 64
+    w64 = max(512, (w // 64) * 64)
+    h64 = max(512, (h // 64) * 64)
+    base = COMFY_LOCAL_URL
+    headers = _comfy_headers()
+    try:
+        workflow = _comfy_workflow_txt2img(prompt, neg, w64, h64, seed_val)
+        sub = http.post(f"{base}/prompt",
+                        json={"prompt": workflow, "client_id": "animeforge-img"},
+                        headers=headers, timeout=30)
+        sub.raise_for_status()
+        prompt_id = sub.json().get("prompt_id")
+        if not prompt_id:
+            _mark_comfy_locked("img: no prompt_id")
+            return None
+
+        # Poll history — SDXL at 28 steps takes ~4-8 sec on 4070 Ti SUPER
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            time.sleep(2)
+            try:
+                h_resp = http.get(f"{base}/history/{prompt_id}", headers=headers, timeout=10)
+                hist = h_resp.json().get(prompt_id) or {}
+                out = hist.get("outputs") or {}
+                imgs = (out.get("7") or {}).get("images") or []
+                if imgs:
+                    fname = imgs[0].get("filename")
+                    subfolder = imgs[0].get("subfolder", "")
+                    break
+            except Exception:
+                continue
+        else:
+            _mark_comfy_locked("img: generation timed out")
+            return None
+
+        r = http.get(f"{base}/view",
+                     params={"filename": fname, "subfolder": subfolder, "type": "output"},
+                     headers=headers, timeout=30)
+        r.raise_for_status()
+        return r.content  # PNG bytes from ComfyUI
+    except Exception as exc:
+        _mark_comfy_locked(f"img: {str(exc)[:80]}")
+        return None
+
+
 @app.route("/scene-art")
 @login_required
 def scene_art():
     """
     Image proxy for scene/thumbnail/hero art.
 
-    Admin and Monarch tiers → fal.ai Hunyuan Image 3.0 (anime SOTA quality, $0.04/img).
-    Free and Hunter tiers   → Pollinations.ai (free, but unreliable faces).
+    Priority order (admin tier):
+      1. Local ComfyUI Animagine XL (free, GPU quality) — when tunnel is up
+      2. fal.ai Hunyuan Image 3.0 (paid, $0.04/img) — when fal has balance
+      3. Pollinations.ai (free fallback, flat 2D)
 
-    Results are cached in-memory by (prompt, seed, w, h) so reloading the same
-    scene doesn't re-spend per view.
+    Non-admin tiers go straight to Pollinations.
+
+    Results are cached in-memory so reloading the same scene is free.
     """
     prompt = (request.args.get("prompt") or "").strip()[:1500]
     seed = request.args.get("seed", type=int)
@@ -1255,10 +1354,28 @@ def scene_art():
         return "missing prompt", 400
 
     tier = "admin" if session.get("is_admin") else session.get("tier", "free")
-    use_fal = tier in ("monarch", "admin") and bool(FAL_KEY)
+    cache_key = (prompt, seed or 0, w, h)
 
+    # 1. Local GPU (admin only, free, best quality when tunnel is live)
+    if tier == "admin" and COMFY_LOCAL_URL and not _comfy_locked():
+        cached = _SCENE_ART_CACHE.get(cache_key)
+        if cached:
+            return Response(cached, mimetype="image/png",
+                            headers={"Cache-Control": "public, max-age=3600",
+                                     "X-Image-Source": "comfy-local-cached"})
+        img_bytes = _comfy_image(prompt, w, h, seed or 0)
+        if img_bytes:
+            if len(_SCENE_ART_CACHE) >= _SCENE_ART_CACHE_MAX:
+                _SCENE_ART_CACHE.clear()
+            _SCENE_ART_CACHE[cache_key] = img_bytes
+            return Response(img_bytes, mimetype="image/png",
+                            headers={"Cache-Control": "public, max-age=3600",
+                                     "X-Image-Source": "comfy-local"})
+        # ComfyUI failed (model not loaded yet, tunnel dead, etc.) → fall through
+
+    # 2. fal.ai Hunyuan (admin/monarch, paid)
+    use_fal = tier in ("monarch", "admin") and bool(FAL_KEY)
     if use_fal:
-        cache_key = (prompt, seed or 0, w, h)
         cached = _SCENE_ART_CACHE.get(cache_key)
         if cached:
             return Response(cached, mimetype="image/jpeg",
@@ -1267,13 +1384,14 @@ def scene_art():
         img_bytes = _fal_image(prompt, w, h, model="hunyuan", seed=seed)
         if img_bytes:
             if len(_SCENE_ART_CACHE) >= _SCENE_ART_CACHE_MAX:
-                _SCENE_ART_CACHE.clear()  # simple bounded eviction
+                _SCENE_ART_CACHE.clear()
             _SCENE_ART_CACHE[cache_key] = img_bytes
             return Response(img_bytes, mimetype="image/jpeg",
                             headers={"Cache-Control": "public, max-age=3600",
                                      "X-Image-Source": "fal-hunyuan"})
-        # fal failed → fall through to Pollinations redirect rather than 500
+        # fal failed → fall through to Pollinations
 
+    # 3. Pollinations (free fallback for all tiers)
     pollinations_url = (
         f"https://image.pollinations.ai/prompt/{quote(prompt)}"
         f"?width={w}&height={h}&seed={seed or 0}&nologo=true&enhance=true&model=flux"
