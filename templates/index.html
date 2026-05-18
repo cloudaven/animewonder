@@ -1682,6 +1682,17 @@
             clearInterval(pollInterval);
             exportSrc = `/download/${exportJobId}`;
             document.getElementById('btn-dl').style.display = 'block';
+            // Auto-download immediately — don't wait for user click.
+            // Render free tier sleeps after ~1 min of no requests; by the
+            // time the user reads "ready" and clicks, the worker may have
+            // restarted and the temp file is gone. Triggering instantly
+            // guarantees the worker is still warm.
+            const a = document.createElement('a');
+            a.href = exportSrc;
+            a.download = '';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
           } else if (job.status === 'error') {
             clearInterval(pollInterval);
             document.getElementById('exp-msg').textContent = 'Error: ' + (job.error || 'Unknown');
@@ -1708,6 +1719,11 @@
 
   function downloadVideo(){if(exportSrc) window.location.href=exportSrc;}
   function closeExport(){document.getElementById('export-overlay').classList.remove('show');}
+
+  // ── Heartbeat — keeps Render free tier awake so downloads don't die ────────
+  // Render sleeps after ~1 min of no requests. Ping /styles (cheap, public)
+  // every 45s so the worker stays warm the entire session.
+  setInterval(() => fetch('/styles').catch(() => {}), 45000);
 
   // ── Boot ───────────────────────────────────────────────────────────────────
   loadLibrary();
