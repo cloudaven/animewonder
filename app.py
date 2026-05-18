@@ -253,6 +253,38 @@ def _mark_comfy_locked(reason: str = "") -> None:
     print(f"[comfy-local] circuit open for 5 min — {reason}", flush=True)
 
 
+# ── Per-scene live video (admin tier) ─────────────────────────────────────────
+# State for the in-browser scene viewer playing real Wan 2.2 motion clips
+# instead of static images. Videos are generated on Justen's home GPU via the
+# same comfy_local path the exporter uses, but cached on disk so navigating
+# back to a scene replays instantly without re-spending generation time.
+#
+# Files land in SCENE_VIDEO_CACHE_DIR keyed by sha256(prompt + seed). The
+# directory is shared across requests for the lifetime of the worker — on
+# Render free tier that's wiped on every redeploy (no persistent disk), which
+# is fine: regen on first view is the existing cost model.
+import hashlib as _hashlib
+SCENE_VIDEO_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".scene_video_cache")
+try:
+    os.makedirs(SCENE_VIDEO_CACHE_DIR, exist_ok=True)
+except OSError as _exc:
+    print(f"[scene-video] WARN: could not create cache dir {SCENE_VIDEO_CACHE_DIR}: {_exc}", flush=True)
+
+scene_video_jobs: dict = {}
+_SCENE_VIDEO_JOBS_LOCK = threading.Lock()
+_SCENE_VIDEO_JOBS_MAX = 100  # bounded so a long uptime can't OOM the dict
+
+def _scene_video_key(prompt: str, seed: int) -> str:
+    h = _hashlib.sha256()
+    h.update(prompt.encode("utf-8", errors="ignore"))
+    h.update(f"|{int(seed)}".encode("ascii"))
+    return h.hexdigest()[:32]
+
+def _scene_video_cached_path(key: str) -> str | None:
+    p = os.path.join(SCENE_VIDEO_CACHE_DIR, f"{key}.mp4")
+    return p if os.path.exists(p) and os.path.getsize(p) > 1024 else None
+
+
 def paypal_base():
     return "https://api-m.sandbox.paypal.com" if PAYPAL_MODE == "sandbox" else "https://api-m.paypal.com"
 
@@ -1185,6 +1217,183 @@ def scene_art():
         f"?width={w}&height={h}&seed={seed or 0}&nologo=true&enhance=true&model=flux"
     )
     return redirect(pollinations_url, code=302)
+
+
+# ── Per-scene live video (admin tier) ──────────────────────────────────────────
+# Endpoints that drive the in-viewer motion playback. The viewer POSTs /scene-video/start
+# when a scene loads; if a cached MP4 exists for that prompt+seed the response is
+# instant. Otherwise a background thread fetches the scene image and runs Wan 2.2
+# 5B image-to-video on the home GPU via the existing animate_scene_comfy helper.
+# Browser then polls /scene-video/status/<key> every ~3s and swaps the <video>
+# src to /scene-video/file/<key>.mp4 when ready.
+
+def _do_scene_video(key: str, prompt: str, seed: int, image_url: str,
+                     cookie_header: str, host_url: str):
+    """Background worker that produces a single scene video and parks it in the
+    on-disk cache. Driven by /scene-video/start. Idempotent: if the cache file
+    already exists we just mark the job ready without re-running comfy.
+
+    host_url must be captured from request.host_url in the route handler — Flask
+    request context does not propagate into background threads.
+    """
+    job = scene_video_jobs.get(key) or {}
+    tmp = tempfile.mkdtemp(prefix="anime_scene_vid_")
+    try:
+        # Short-circuit if another worker beat us to it.
+        cached = _scene_video_cached_path(key)
+        if cached:
+            job.update({"status": "ready", "url": f"/scene-video/file/{key}.mp4",
+                        "progress": 100, "message": "Cached"})
+            return
+
+        # Resolve the scene-art URL to absolute form using the host captured at
+        # request time (background threads have no request context).
+        img_url_full = image_url
+        if image_url.startswith("/"):
+            img_url_full = host_url.rstrip("/") + image_url if host_url else image_url
+        try:
+            headers = {"Cookie": cookie_header} if cookie_header else {}
+            r = http.get(img_url_full, headers=headers, timeout=120, allow_redirects=True)
+            r.raise_for_status()
+            img_bytes = r.content
+        except Exception as exc:
+            job.update({"status": "failed", "message": f"image fetch failed: {str(exc)[:80]}"})
+            return
+
+        img_path = os.path.join(tmp, "src.jpg")
+        with open(img_path, "wb") as fh:
+            fh.write(img_bytes)
+
+        # Fake "job" dict shape that animate_scene_comfy expects (it writes
+        # message/elapsed_seconds into it for the export status feed).
+        comfy_job = {"start_time": time.time(), "message": "", "elapsed_seconds": 0}
+        job.update({"status": "generating", "progress": 30,
+                    "message": "Generating motion on local GPU…"})
+        vid_path = animate_scene_comfy(img_path, prompt, tmp, 0, comfy_job)
+        if not vid_path or not os.path.exists(vid_path):
+            job.update({"status": "failed",
+                        "message": "GPU unavailable (PC asleep, tunnel down, or comfy locked)"})
+            return
+
+        # Move into the persistent cache atomically (rename within same filesystem).
+        dst = os.path.join(SCENE_VIDEO_CACHE_DIR, f"{key}.mp4")
+        try:
+            shutil.move(vid_path, dst)
+        except Exception:
+            shutil.copyfile(vid_path, dst)
+        job.update({"status": "ready", "progress": 100,
+                    "url": f"/scene-video/file/{key}.mp4",
+                    "message": "Ready"})
+    except Exception as exc:
+        job.update({"status": "failed", "message": f"worker crashed: {str(exc)[:120]}"})
+    finally:
+        try:
+            shutil.rmtree(tmp, ignore_errors=True)
+        except Exception:
+            pass
+
+
+def _gc_scene_video_jobs():
+    """Trim oldest entries when the jobs dict exceeds the bound. Keeps the
+    server from accumulating unbounded job state across long uptimes."""
+    with _SCENE_VIDEO_JOBS_LOCK:
+        if len(scene_video_jobs) <= _SCENE_VIDEO_JOBS_MAX:
+            return
+        # Sort by created_at (older first) and drop the excess
+        items = sorted(scene_video_jobs.items(), key=lambda kv: kv[1].get("created_at", 0))
+        excess = len(scene_video_jobs) - _SCENE_VIDEO_JOBS_MAX
+        for k, _ in items[:excess]:
+            scene_video_jobs.pop(k, None)
+
+
+@app.route("/scene-video/start", methods=["POST"])
+@login_required
+def scene_video_start():
+    """Kick off (or look up) a Wan 2.2 motion clip for a single scene.
+
+    Gated to admin tier: it spends Justen's home-GPU electricity and is shaped
+    around his single-card serial throughput. Paying users still get static
+    images in the viewer; their motion comes from fal.ai during MP4 export.
+
+    Body: {prompt: str, seed: int, image_url: str}
+    Response: {key, status, url?, message?, cached: bool}
+    """
+    tier = "admin" if session.get("is_admin") else session.get("tier", "free")
+    if tier != "admin":
+        return jsonify({"error": "Live motion preview is admin-only.",
+                        "status": "denied"}), 403
+    if not COMFY_LOCAL_URL:
+        return jsonify({"status": "unavailable",
+                        "message": "Local GPU tunnel is not configured."}), 503
+    if _comfy_locked():
+        return jsonify({"status": "unavailable",
+                        "message": "Local GPU recently failed — try again in a few minutes."}), 503
+
+    data = request.json or {}
+    prompt = (data.get("prompt") or "").strip()[:1500]
+    seed = int(data.get("seed") or 0)
+    image_url = (data.get("image_url") or "").strip()
+    if not prompt or not image_url:
+        return jsonify({"error": "missing prompt or image_url"}), 400
+
+    key = _scene_video_key(prompt, seed)
+
+    # Cache hit — return immediately, no worker needed.
+    if _scene_video_cached_path(key):
+        return jsonify({"key": key, "status": "ready", "cached": True,
+                        "url": f"/scene-video/file/{key}.mp4"})
+
+    # Existing job for this key — return its current state without re-spawning.
+    with _SCENE_VIDEO_JOBS_LOCK:
+        existing = scene_video_jobs.get(key)
+        if existing and existing.get("status") in ("queued", "generating", "ready"):
+            return jsonify({"key": key, "cached": False, **existing})
+
+        scene_video_jobs[key] = {
+            "status": "queued", "progress": 5, "message": "Queued for local GPU…",
+            "created_at": time.time(),
+        }
+        _gc_scene_video_jobs()
+
+    cookie_header = request.headers.get("Cookie", "")
+    host_url = request.host_url  # captured here — worker has no request ctx
+    threading.Thread(
+        target=_do_scene_video,
+        args=(key, prompt, seed, image_url, cookie_header, host_url),
+        daemon=True,
+    ).start()
+
+    return jsonify({"key": key, "status": "queued", "cached": False,
+                    "message": "Queued for local GPU…"})
+
+
+@app.route("/scene-video/status/<key>")
+@login_required
+def scene_video_status(key):
+    """Polling endpoint for the viewer. Cheap — just reads the dict."""
+    if not re.fullmatch(r"[a-f0-9]{32}", key or ""):
+        return jsonify({"status": "not_found"}), 404
+    # File-on-disk wins over in-memory state — survives worker restarts.
+    if _scene_video_cached_path(key):
+        return jsonify({"status": "ready", "url": f"/scene-video/file/{key}.mp4"})
+    job = scene_video_jobs.get(key)
+    if not job:
+        return jsonify({"status": "not_found"}), 404
+    return jsonify({"key": key, **job})
+
+
+@app.route("/scene-video/file/<key>.mp4")
+@login_required
+def scene_video_file(key):
+    """Serve a cached scene MP4. Browser <video> element fetches this once
+    /scene-video/status returns ready."""
+    if not re.fullmatch(r"[a-f0-9]{32}", key or ""):
+        return "bad key", 404
+    path = _scene_video_cached_path(key)
+    if not path:
+        return "not ready", 404
+    return send_file(path, mimetype="video/mp4", conditional=True,
+                     download_name=f"scene_{key[:8]}.mp4")
 
 
 # ── Video export ───────────────────────────────────────────────────────────────

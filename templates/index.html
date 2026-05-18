@@ -388,6 +388,49 @@
       100% { transform:scale(1.11) translate(-.8%,.5%); }
     }
 
+    /* Live-motion video — sits above the still image and fades in when a
+       Wan 2.2 clip becomes available for this scene. Static image is the
+       fallback while we wait (or when admin's home GPU is offline). */
+    #vp-vid {
+      position:absolute; inset:0; width:100%; height:100%; object-fit:cover;
+      z-index:1; display:none; opacity:0;
+      transition:opacity .8s ease;
+      background:#000;
+    }
+    #vp-vid.show { display:block; opacity:1; }
+
+    /* Small chip that appears while a scene video is being generated.
+       Hidden by default; .show fades it in. */
+    .vp-motion-badge {
+      position:absolute; top:14px; right:14px; z-index:7;
+      background:rgba(0,0,0,.55); border:1px solid rgba(0,170,255,.45);
+      color:#9fdcff; font-family:'Orbitron',sans-serif;
+      font-size:.6rem; letter-spacing:.12em; padding:6px 11px;
+      border-radius:18px; backdrop-filter:blur(4px);
+      display:none; align-items:center; gap:7px;
+      box-shadow:0 0 18px rgba(0,170,255,.25);
+    }
+    .vp-motion-badge.show { display:inline-flex; }
+    .vp-motion-badge.ready {
+      border-color:rgba(80,255,160,.55); color:#a8ffce;
+      box-shadow:0 0 18px rgba(80,255,160,.25);
+      animation:fadeAndHide 2.5s ease forwards;
+    }
+    @keyframes fadeAndHide {
+      0%   { opacity:1; }
+      60%  { opacity:1; }
+      100% { opacity:0; display:none; }
+    }
+    .vp-motion-dot {
+      width:7px; height:7px; border-radius:50%;
+      background:#00aaff; box-shadow:0 0 8px #00aaff;
+      animation:motionPulse 1.1s ease-in-out infinite;
+    }
+    @keyframes motionPulse {
+      0%,100% { transform:scale(.85); opacity:.55; }
+      50%     { transform:scale(1.25); opacity:1; }
+    }
+
     /* Canvas — PARTICLES ONLY, no image drawing */
     #vp-canvas { position:absolute; inset:0; width:100%; height:100%; z-index:2; pointer-events:none; }
 
@@ -676,11 +719,17 @@
     </div>
   </div>
 
-  <!-- THE FIX: <img> tag is the scene image. Canvas is particles only. -->
+  <!-- THE FIX: <img> tag is the scene image. Canvas is particles only.
+       <video> overlays the image when a live Wan 2.2 motion clip is ready
+       (admin tier, home GPU). Falls back to the still image otherwise. -->
   <div class="viewport" id="viewport">
     <div class="vp-lb-bot"></div>
     <div class="vp-loader" id="vp-loader"><div class="vp-ring"></div></div>
     <img id="vp-img" src="" alt="">
+    <video id="vp-vid" autoplay loop muted playsinline preload="auto"></video>
+    <div class="vp-motion-badge" id="vp-motion-badge">
+      <span class="vp-motion-dot"></span><span id="vp-motion-text">GENERATING MOTION…</span>
+    </div>
     <canvas id="vp-canvas"></canvas>
     <div class="vp-grad"></div>
     <div class="vp-aura"></div>
@@ -791,6 +840,17 @@
   let libLoaded=false, libTab='stories';
   const CAN_4K = {{ 'true' if tier in ('monarch','admin') else 'false' }};
   const CAN_PREMIUM_ANIM = {{ 'true' if tier in ('monarch','admin') else 'false' }};
+  // Live in-viewer motion (real Wan 2.2 clips, not Ken Burns) is admin-only —
+  // it spends Justen's home-GPU electricity and serializes through one card.
+  // Paying users keep getting static images here; their motion ships in exports.
+  const CAN_LIVE_MOTION = {{ 'true' if is_admin else 'false' }};
+  // Per-scene-index state for the live-motion pipeline. Avoids re-POSTing
+  // /scene-video/start on every loadScene call when the user navigates back.
+  // Shape: { [sceneIdx]: { key, status, url, pollTimer, generation } }
+  const sceneVideoState = {};
+  // generation counter increments every loadScene call. Late callbacks check
+  // it to avoid swapping in a video for a scene the user has already left.
+  let loadGeneration = 0;
 
   // Active art style — set by the picker. SL_SUFFIX is what we paste into
   // every artUrl on the client (hero/thumbnail/poster previews).
@@ -1057,6 +1117,9 @@
     if(!story||!story.scenes) return;
     const sc=story.scenes[idx]; if(!sc) return;
     clearDlTimers();
+    // Bump the generation so any in-flight motion-video poller from the
+    // previous scene drops its result instead of swapping it into the viewer.
+    loadGeneration += 1;
     document.getElementById('vp-num').textContent=`SCENE ${String(sc.number||idx+1).padStart(2,'0')}`;
     document.getElementById('vp-name').textContent=sc.title||'';
     document.getElementById('vp-mood').textContent=(sc.mood||'').toUpperCase();
@@ -1072,7 +1135,11 @@
     const base=sc.image_prompt||`anime scene, ${sc.setting}, ${sc.mood} atmosphere`;
     // /scene-art → fal.ai Hunyuan for admin/Monarch (anime SOTA, fixes face drift);
     // Pollinations redirect for free/Hunter (no cost change).
-    loadSceneImg(artUrl(`${base},${SL_SUFFIX}`, 1920, 1080, idx*17+5));
+    const stillUrl = artUrl(`${base},${SL_SUFFIX}`, 1920, 1080, idx*17+5);
+    loadSceneImg(stillUrl);
+    // Admin-only: ask the home GPU for a real Wan 2.2 motion clip of this
+    // scene. Falls back silently to the still image if the GPU is offline.
+    kickoffSceneVideo(sc, idx, stillUrl);
 
     const dlist=document.getElementById('dlist');
     dlist.innerHTML='';
@@ -1111,6 +1178,125 @@
       loader.style.display='none';
     };
     preload.src=url;
+  }
+
+  // ── Live-motion (admin only): swap the still image for a Wan 2.2 clip ─────
+  // Pipeline:
+  //   1. Hide any prior <video> (we're entering a new scene)
+  //   2. If a clip is already cached for this prompt+seed, show it instantly
+  //   3. Otherwise POST /scene-video/start, then poll /scene-video/status
+  //   4. When ready, swap the video in over the image
+  //   5. If the user has already navigated away, drop the result (loadGeneration check)
+  function showMotionBadge(text, ready){
+    const b = document.getElementById('vp-motion-badge');
+    const t = document.getElementById('vp-motion-text');
+    if (!b || !t) return;
+    t.textContent = text;
+    b.classList.toggle('ready', !!ready);
+    b.classList.add('show');
+    if (ready) {
+      // CSS animation auto-hides after 2.5s, but also clear the class so a
+      // re-trigger on next scene starts fresh.
+      setTimeout(() => b.classList.remove('show','ready'), 2700);
+    }
+  }
+  function hideMotionBadge(){
+    const b = document.getElementById('vp-motion-badge');
+    if (b) b.classList.remove('show','ready');
+  }
+  function hideMotionVideo(){
+    const v = document.getElementById('vp-vid');
+    if (!v) return;
+    v.classList.remove('show');
+    try { v.pause(); } catch (_) {}
+    // Don't clear src yet — keep the last frame visible during transition;
+    // it'll be replaced when the next scene's video loads.
+  }
+  function attachMotionVideo(url, myGeneration){
+    if (myGeneration !== loadGeneration) return; // user moved on
+    const v = document.getElementById('vp-vid');
+    if (!v) return;
+    v.src = url;
+    v.load();
+    v.play().catch(() => { /* autoplay-with-sound rules vary; muted should always work */ });
+    v.classList.add('show');
+    showMotionBadge('LIVE MOTION', true);
+  }
+  function kickoffSceneVideo(sc, idx, imageUrl){
+    hideMotionVideo();
+    hideMotionBadge();
+    if (!CAN_LIVE_MOTION) return; // tier-gated
+    if (!sc) return;
+    const base = sc.image_prompt || `anime scene, ${sc.setting||''}, ${sc.mood||'epic'} atmosphere`;
+    const prompt = `${base},${SL_SUFFIX}`;
+    const seed = idx*17+5;
+    const myGeneration = loadGeneration;
+    // Cancel any in-flight poller for this slot
+    const prev = sceneVideoState[idx];
+    if (prev && prev.pollTimer) { clearTimeout(prev.pollTimer); prev.pollTimer = null; }
+
+    // If we already have a ready URL for this scene+prompt, reuse it instantly
+    if (prev && prev.status === 'ready' && prev.url && prev.prompt === prompt) {
+      attachMotionVideo(prev.url, myGeneration);
+      return;
+    }
+
+    showMotionBadge('GENERATING MOTION…', false);
+    fetch('/scene-video/start', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ prompt, seed, image_url: imageUrl }),
+    }).then(r => r.json().then(j => ({ status: r.status, body: j })))
+      .then(({status, body}) => {
+        if (status === 403 || status === 503) {
+          hideMotionBadge();
+          return;
+        }
+        if (!body || !body.key) { hideMotionBadge(); return; }
+        sceneVideoState[idx] = {
+          key: body.key, status: body.status || 'queued',
+          url: body.url || null, prompt, generation: myGeneration, pollTimer: null,
+        };
+        if (body.cached && body.url) {
+          attachMotionVideo(body.url, myGeneration);
+          return;
+        }
+        pollSceneVideo(body.key, idx, myGeneration);
+      })
+      .catch(() => hideMotionBadge());
+  }
+  function pollSceneVideo(key, idx, myGeneration){
+    // ~3s cadence — Wan clip is ~105s on the 4070 Ti SUPER so ~35 polls max.
+    // Hard ceiling: 4 minutes (80 polls). Beyond that we assume GPU is offline.
+    let attempts = 0;
+    const MAX_ATTEMPTS = 80;
+    const tick = () => {
+      if (myGeneration !== loadGeneration) return; // user navigated away
+      attempts += 1;
+      if (attempts > MAX_ATTEMPTS) { hideMotionBadge(); return; }
+      fetch(`/scene-video/status/${key}`)
+        .then(r => r.json())
+        .then(body => {
+          if (!body) return;
+          const st = sceneVideoState[idx];
+          if (st) st.status = body.status;
+          if (body.status === 'ready' && body.url) {
+            if (st) st.url = body.url;
+            attachMotionVideo(body.url, myGeneration);
+          } else if (body.status === 'failed' || body.status === 'not_found') {
+            hideMotionBadge();
+          } else {
+            // Still queued / generating — keep polling
+            const t = setTimeout(tick, 3000);
+            if (st) st.pollTimer = t;
+          }
+        })
+        .catch(() => {
+          const t = setTimeout(tick, 4000);
+          if (sceneVideoState[idx]) sceneVideoState[idx].pollTimer = t;
+        });
+    };
+    tick();
   }
 
   function prevScene(){if(sceneIdx>0){sceneIdx--;loadScene(sceneIdx);}}
