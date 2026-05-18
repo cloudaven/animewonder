@@ -209,72 +209,98 @@
     .btn-primary:active { transform:none; }
     .btn-primary:disabled { opacity:.35; cursor:not-allowed; transform:none; animation:none; }
 
-    /* ─── LIBRARY SECTIONS ────────────────────────────────────────────── */
-    .library { padding:10px 0 0; width:100%; }
-    .lib-section { margin-bottom:32px; }
-    .lib-header { display:flex; align-items:center; justify-content:space-between;
-                  margin-bottom:14px; padding:0 20px; }
-    .lib-title { font-family:'Orbitron',sans-serif; font-size:.78rem; color:#fff;
-                 letter-spacing:.15em; text-transform:uppercase; }
-    .lib-tabs { display:flex; gap:6px; }
-    .ltab { padding:5px 14px; border-radius:3px; font-family:'Orbitron',sans-serif;
-            font-size:.56rem; letter-spacing:.12em; cursor:pointer;
-            color:rgba(255,255,255,.38); background:transparent;
-            border-bottom:2px solid transparent; transition:all .2s; }
-    .ltab.active { color:#fff; border-bottom-color:var(--blue); }
+    /* ─── LIBRARY — Crunchyroll horizontal rows ──────────────────────── */
+    .library { padding:10px 0 80px; width:100%; }
+    .cr-section { margin-bottom:28px; }
 
-    /* Netflix/Crunchyroll card grid */
-    .anime-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(165px,1fr));
-                  gap:6px; padding:0 20px; }
+    .cr-row-header {
+      display:flex; align-items:center; justify-content:space-between;
+      padding:0 16px; margin-bottom:10px;
+    }
+    .cr-row-title {
+      font-family:'Orbitron',sans-serif; font-size:.78rem; color:#fff;
+      letter-spacing:.2em; text-transform:uppercase;
+    }
 
-    .anime-card { border-radius:4px; overflow:visible; cursor:pointer;
-                  background:transparent; transition:transform .3s,z-index 0s .3s;
-                  position:relative; z-index:0; }
-    .anime-card:hover { transform:scale(1.08); z-index:10; transition:transform .3s,z-index 0s; }
+    /* Horizontal scroll row */
+    .cr-row {
+      display:flex; gap:8px; overflow-x:auto; padding:4px 16px 12px;
+      scroll-snap-type:x mandatory; -webkit-overflow-scrolling:touch;
+      scrollbar-width:none;
+    }
+    .cr-row::-webkit-scrollbar { display:none; }
 
-    .anime-thumb { position:relative; aspect-ratio:2/3; overflow:hidden;
-                   background:#0a0a14; border-radius:4px; }
+    /* Individual card */
+    .anime-card {
+      flex:0 0 220px; border-radius:6px; overflow:visible; cursor:pointer;
+      background:transparent; transition:transform .25s,z-index 0s .25s;
+      position:relative; z-index:0; scroll-snap-align:start;
+    }
+    @media(max-width:600px){ .anime-card{ flex:0 0 160px; } }
+    .anime-card:hover { transform:scale(1.06) translateY(-5px); z-index:10;
+                        transition:transform .25s,z-index 0s; }
+
+    /* Landscape thumbnail (16:9 like Crunchyroll) */
+    .anime-thumb {
+      position:relative; aspect-ratio:16/9; overflow:hidden;
+      background:#0a0a14; border-radius:6px;
+      box-shadow:0 4px 14px rgba(0,0,0,.55);
+    }
     .anime-thumb img { width:100%; height:100%; object-fit:cover; display:block;
-                       transition:filter .3s; }
-    .anime-card:hover .anime-thumb img { filter:brightness(.5); }
+                       transition:filter .25s; }
+    .anime-card:hover .anime-thumb img { filter:brightness(.4); }
 
-    /* Netflix-style hover info panel */
+    /* Title shown below the thumbnail always (Crunchyroll style) */
+    .cr-card-title {
+      padding:7px 2px 0; font-size:.73rem; color:rgba(255,255,255,.82);
+      white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+      font-weight:600; letter-spacing:.01em; line-height:1.3;
+    }
+    .cr-card-sub {
+      font-size:.6rem; color:rgba(255,255,255,.38); margin-top:2px;
+      white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+    }
+
+    /* Hover overlay panel */
     .anime-hover-panel {
-      position:absolute; bottom:0; left:0; right:0; padding:12px 10px 10px;
-      background:linear-gradient(transparent, rgba(0,0,0,.95) 40%);
-      opacity:0; transition:opacity .3s; border-radius:0 0 4px 4px;
-      pointer-events:none;
+      position:absolute; inset:0; padding:10px;
+      background:rgba(0,0,0,.6); border-radius:6px;
+      opacity:0; transition:opacity .2s; pointer-events:none;
+      display:flex; flex-direction:column; justify-content:flex-end;
     }
     .anime-card:hover .anime-hover-panel { opacity:1; pointer-events:auto; }
 
-    .anime-play-row { display:flex; gap:6px; align-items:center; margin-bottom:7px; }
-    .anime-play-btn { width:32px; height:32px; border-radius:50%;
-                      background:#fff; display:flex; align-items:center; justify-content:center;
-                      font-size:.85rem; color:#000; padding-left:2px;
-                      border:none; cursor:pointer; flex-shrink:0; }
-    .anime-save-btn { width:28px; height:28px; border-radius:50%;
-                      background:rgba(255,255,255,.15); border:2px solid rgba(255,255,255,.5);
-                      display:flex; align-items:center; justify-content:center;
-                      font-size:.7rem; cursor:pointer; flex-shrink:0; transition:background .2s; }
-    .anime-save-btn:hover { background:rgba(255,255,255,.3); }
-    .anime-del-btn  { width:28px; height:28px; border-radius:50%;
-                      background:rgba(255,255,255,.1); border:2px solid rgba(255,255,255,.35);
-                      display:flex; align-items:center; justify-content:center;
-                      font-size:.6rem; cursor:pointer; color:rgba(255,80,80,.8);
-                      margin-left:auto; flex-shrink:0; transition:all .2s; }
-    .anime-del-btn:hover { background:rgba(255,0,0,.25); border-color:rgba(255,80,80,.7); }
+    .anime-play-row { display:flex; gap:7px; align-items:center; margin-bottom:6px; }
+    .anime-play-btn {
+      width:36px; height:36px; border-radius:50%;
+      background:#fff; display:flex; align-items:center; justify-content:center;
+      font-size:.9rem; color:#000; padding-left:3px;
+      border:none; cursor:pointer; flex-shrink:0;
+      box-shadow:0 2px 8px rgba(0,0,0,.5); transition:transform .15s;
+    }
+    .anime-play-btn:hover { transform:scale(1.1); }
+    .anime-del-btn {
+      width:30px; height:30px; border-radius:50%;
+      background:rgba(255,255,255,.12); border:2px solid rgba(255,255,255,.3);
+      display:flex; align-items:center; justify-content:center;
+      font-size:.65rem; cursor:pointer; color:rgba(255,80,80,.9);
+      margin-left:auto; flex-shrink:0; transition:all .2s;
+    }
+    .anime-del-btn:hover { background:rgba(255,0,0,.2); border-color:rgba(255,80,80,.6); }
 
-    .anime-hover-title { font-weight:700; font-size:.8rem; margin-bottom:5px;
-                         white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    .anime-hover-tags  { display:flex; gap:5px; flex-wrap:wrap; }
-    .anime-tag { font-size:.56rem; color:rgba(255,255,255,.55); }
-    .anime-tag + .anime-tag::before { content:'·'; margin-right:5px; color:rgba(255,255,255,.3); }
+    .anime-hover-title { font-weight:700; font-size:.78rem; margin-bottom:4px;
+                         white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+                         color:#fff; text-shadow:0 1px 4px rgba(0,0,0,.8); }
+    .anime-hover-tags  { display:flex; gap:4px; flex-wrap:wrap; }
+    .anime-tag { font-size:.55rem; color:rgba(255,255,255,.5); }
+    .anime-tag + .anime-tag::before { content:'·'; margin-right:4px; color:rgba(255,255,255,.25); }
 
-    /* Crunchyroll-style badge on thumbnail */
+    /* Badge top-left on thumbnail */
     .anime-badge {
       position:absolute; top:6px; left:6px;
-      font-family:'Orbitron',sans-serif; font-size:.46rem; letter-spacing:.1em;
+      font-family:'Orbitron',sans-serif; font-size:.44rem; letter-spacing:.1em;
       padding:2px 7px; border-radius:2px; color:#fff; font-weight:700;
+      text-shadow:none;
     }
     .badge-episode { background:#00aaff; }
     .badge-short   { background:#6600ff; }
@@ -282,10 +308,12 @@
     .badge-season  { background:#cc8800; }
     .badge-new     { background:#cc0000; }
 
-    /* Crunchyroll rating-style match score */
-    .anime-match { position:absolute; bottom:38px; left:8px;
-                   font-family:'Orbitron',sans-serif; font-size:.6rem;
-                   color:#4caf50; font-weight:700; letter-spacing:.06em; }
+    /* Match score bottom-left */
+    .anime-match {
+      position:absolute; bottom:6px; left:8px;
+      font-family:'Orbitron',sans-serif; font-size:.58rem;
+      color:#4caf50; font-weight:700; letter-spacing:.06em;
+    }
 
     .no-projects { text-align:center; font-size:.78rem; color:rgba(255,255,255,.22);
                    padding:32px 20px; letter-spacing:.08em; }
@@ -642,23 +670,19 @@
     </div>
   </div>
 
-  <!-- Library -->
+  <!-- Library — Crunchyroll horizontal rows -->
   <div class="library">
-    <!-- Stories + Seasons tabs -->
-    <div class="lib-section">
-      <div class="lib-header">
-        <div class="lib-title">My Library</div>
-        <div class="lib-tabs">
-          <div class="ltab active" id="ltab-stories" onclick="switchLibTab('stories')">Stories</div>
-          <div class="ltab" id="ltab-seasons" onclick="switchLibTab('seasons')">Seasons</div>
-        </div>
+    <div class="cr-section">
+      <div class="cr-row-header">
+        <div class="cr-row-title">Your Stories</div>
       </div>
-      <div id="lib-stories">
-        <div class="anime-grid" id="proj-stories"><div class="no-projects">Loading...</div></div>
+      <div class="cr-row" id="proj-stories"><div class="no-projects">Loading...</div></div>
+    </div>
+    <div class="cr-section" id="seasons-section">
+      <div class="cr-row-header">
+        <div class="cr-row-title">Your Seasons</div>
       </div>
-      <div id="lib-seasons" style="display:none">
-        <div class="anime-grid" id="proj-seasons"><div class="no-projects">Loading...</div></div>
-      </div>
+      <div class="cr-row" id="proj-seasons"><div class="no-projects">Loading...</div></div>
     </div>
   </div>
 </div>
@@ -1369,49 +1393,58 @@
     el.innerHTML = items.map(p=>{
       const type = (p.type||'episode').toLowerCase();
       const score = matchScore(p.title||'');
-      return `<div class="anime-card" onclick="loadProject(${p.id})" style="cursor:pointer">
+      return `<div class="anime-card" onclick="loadProject(${p.id})">
         <div class="anime-thumb">
           <img src="${posterUrl(p.title,p.genre,simpleHash(p.title||'x'))}" alt="" loading="lazy" onerror="this.style.opacity='.15'">
           <div class="anime-badge badge-${type}">${type.toUpperCase()}</div>
           <div class="anime-match">${score}% Match</div>
           <div class="anime-hover-panel">
+            <div class="anime-hover-title">${escHtml(p.title||'Untitled')}</div>
             <div class="anime-play-row">
               <button class="anime-play-btn" onclick="event.stopPropagation();loadProject(${p.id})">▶</button>
               <div class="anime-del-btn" onclick="event.stopPropagation();deleteProject(${p.id},this.closest('.anime-card'))">✕</div>
             </div>
-            <div class="anime-hover-title">${escHtml(p.title||'Untitled')}</div>
             <div class="anime-hover-tags">
               <span class="anime-tag">${escHtml(p.genre||type)}</span>
               <span class="anime-tag">${escHtml((p.updated_at||'').slice(0,10))}</span>
             </div>
           </div>
         </div>
+        <div class="cr-card-title">${escHtml(p.title||'Untitled')}</div>
+        <div class="cr-card-sub">${escHtml(p.genre||type)}</div>
       </div>`;
     }).join('');
   }
 
   function renderSeasonGrid(elId, items){
     const el = document.getElementById(elId);
-    if(!items.length){el.innerHTML='<div class="no-projects">No saved seasons yet.</div>';return;}
+    const section = document.getElementById('seasons-section');
+    if(!items.length){
+      if(section) section.style.display='none';
+      return;
+    }
+    if(section) section.style.display='';
     el.innerHTML = items.map(s=>{
       const score = matchScore(s.title||'');
-      return `<div class="anime-card">
+      return `<div class="anime-card" onclick="loadSeason(${s.id})">
         <div class="anime-thumb">
           <img src="${posterUrl(s.title,s.genre,simpleHash(s.title||'x')+1)}" alt="" loading="lazy" onerror="this.style.opacity='.15'">
           <div class="anime-badge badge-season">SEASON</div>
           <div class="anime-match">${score}% Match</div>
           <div class="anime-hover-panel">
-            <div class="anime-play-row">
-              <button class="anime-play-btn" onclick="loadSeason(${s.id})">▶</button>
-              <div class="anime-del-btn" onclick="deleteSeason(${s.id},this.closest('.anime-card'))">✕</div>
-            </div>
             <div class="anime-hover-title">${escHtml(s.title||'Untitled')}</div>
+            <div class="anime-play-row">
+              <button class="anime-play-btn" onclick="event.stopPropagation();loadSeason(${s.id})">▶</button>
+              <div class="anime-del-btn" onclick="event.stopPropagation();deleteSeason(${s.id},this.closest('.anime-card'))">✕</div>
+            </div>
             <div class="anime-hover-tags">
               <span class="anime-tag">${escHtml(s.episodes_generated)}/12 eps</span>
               <span class="anime-tag">${escHtml(s.genre||'')}</span>
             </div>
           </div>
         </div>
+        <div class="cr-card-title">${escHtml(s.title||'Untitled')}</div>
+        <div class="cr-card-sub">${escHtml(s.genre||'')} · ${escHtml(s.episodes_generated)}/12 eps</div>
       </div>`;
     }).join('');
   }
