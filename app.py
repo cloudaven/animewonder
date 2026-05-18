@@ -1310,12 +1310,14 @@ def _comfy_image(prompt: str, w: int, h: int, seed: int) -> bytes | None:
             _mark_comfy_locked("img: no prompt_id")
             return None
 
-        # Poll history — SDXL at 28 steps takes ~4-8 sec on 4070 Ti SUPER
-        deadline = time.time() + 120
+        # Poll history — short deadline so we don't block the request thread
+        # while ComfyUI is busy with a Wan video job. Falls through to
+        # Pollinations if GPU isn't free within 25 sec.
+        deadline = time.time() + 25
         while time.time() < deadline:
             time.sleep(2)
             try:
-                h_resp = http.get(f"{base}/history/{prompt_id}", headers=headers, timeout=10)
+                h_resp = http.get(f"{base}/history/{prompt_id}", headers=headers, timeout=8)
                 hist = h_resp.json().get(prompt_id) or {}
                 out = hist.get("outputs") or {}
                 imgs = (out.get("7") or {}).get("images") or []
@@ -1326,7 +1328,7 @@ def _comfy_image(prompt: str, w: int, h: int, seed: int) -> bytes | None:
             except Exception:
                 continue
         else:
-            _mark_comfy_locked("img: generation timed out")
+            # GPU busy — don't lock the circuit, just return None so Pollinations kicks in
             return None
 
         r = http.get(f"{base}/view",
@@ -1364,24 +1366,12 @@ def scene_art():
     tier = "admin" if session.get("is_admin") else session.get("tier", "free")
     cache_key = (prompt, seed or 0, w, h)
 
-    # 1. Local GPU (admin only, free, best quality when tunnel is live)
-    if tier == "admin" and COMFY_LOCAL_URL and not _comfy_locked():
-        cached = _SCENE_ART_CACHE.get(cache_key)
-        if cached:
-            return Response(cached, mimetype="image/png",
-                            headers={"Cache-Control": "public, max-age=3600",
-                                     "X-Image-Source": "comfy-local-cached"})
-        img_bytes = _comfy_image(prompt, w, h, seed or 0)
-        if img_bytes:
-            if len(_SCENE_ART_CACHE) >= _SCENE_ART_CACHE_MAX:
-                _SCENE_ART_CACHE.clear()
-            _SCENE_ART_CACHE[cache_key] = img_bytes
-            return Response(img_bytes, mimetype="image/png",
-                            headers={"Cache-Control": "public, max-age=3600",
-                                     "X-Image-Source": "comfy-local"})
-        # ComfyUI failed (model not loaded yet, tunnel dead, etc.) → fall through
+    # Scene-art skips ComfyUI to keep the viewer fast and non-blocking.
+    # Animagine XL is used for export frame generation (do_export) where
+    # we can afford to wait. For the viewer, Pollinations is instant and
+    # the Wan animation clips overlay it anyway.
 
-    # 2. fal.ai Hunyuan (admin/monarch, paid)
+    # fal.ai Hunyuan (admin/monarch, paid — only when fal has balance)
     use_fal = tier in ("monarch", "admin") and bool(FAL_KEY)
     if use_fal:
         cached = _SCENE_ART_CACHE.get(cache_key)
