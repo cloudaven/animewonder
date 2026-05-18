@@ -133,6 +133,14 @@ TIER_MODES   = {
 
 export_jobs = {}
 
+# Disk-backed export manifest so downloads survive in-memory job loss
+# (Render free tier can restart workers; this keeps the file findable)
+EXPORT_READY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".export_ready")
+try:
+    os.makedirs(EXPORT_READY_DIR, exist_ok=True)
+except OSError:
+    pass
+
 
 def extract_json(text):
     text = text.strip()
@@ -2198,6 +2206,14 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
             "progress": 100, "message": f"Your {quality.upper()} 30fps video is ready!",
             "tmp_dir": tmp, "elapsed_seconds": int(elapsed), "eta_seconds": 0,
         })
+        # Write disk manifest so the download endpoint can find the file
+        # even if the in-memory dict is wiped by a worker restart.
+        try:
+            manifest = {"file_path": out_path, "file_name": out_name}
+            with open(os.path.join(EXPORT_READY_DIR, f"{job_id}.json"), "w") as mf:
+                json.dump(manifest, mf)
+        except Exception:
+            pass
     except Exception as e:
         job.update({"status": "error", "message": str(e), "error": str(e)})
         shutil.rmtree(tmp, ignore_errors=True)
@@ -2315,19 +2331,43 @@ def export_status_sse(job_id):
 @login_required
 def download(job_id):
     job = export_jobs.get(job_id)
-    if job and job.get("status")=="complete" and job.get("file_path"):
+    file_path = None
+    file_name = "anime.mp4"
+    tmp_dir = None
+
+    if job and job.get("status") == "complete" and job.get("file_path"):
+        file_path = job.get("file_path")
+        file_name = job.get("file_name", file_name)
         tmp_dir = job.get("tmp_dir")
+    else:
+        # Fallback: check disk manifest (survives in-memory wipe from deploys)
+        manifest_path = os.path.join(EXPORT_READY_DIR, f"{job_id}.json")
+        if os.path.exists(manifest_path):
+            try:
+                with open(manifest_path) as mf:
+                    m = json.load(mf)
+                fp = m.get("file_path", "")
+                if fp and os.path.exists(fp):
+                    file_path = fp
+                    file_name = m.get("file_name", file_name)
+            except Exception:
+                pass
+
+    if file_path and os.path.exists(file_path):
         @after_this_request
         def cleanup(response):
             try:
                 if tmp_dir:
                     shutil.rmtree(tmp_dir, ignore_errors=True)
                 export_jobs.pop(job_id, None)
+                mpath = os.path.join(EXPORT_READY_DIR, f"{job_id}.json")
+                if os.path.exists(mpath):
+                    os.remove(mpath)
             except Exception:
                 pass
             return response
-        return send_file(job["file_path"], as_attachment=True,
-                         download_name=job.get("file_name","anime.mp4"), mimetype="video/mp4")
+        return send_file(file_path, as_attachment=True,
+                         download_name=file_name, mimetype="video/mp4")
     return "File not ready.", 404
 
 
