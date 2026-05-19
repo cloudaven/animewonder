@@ -106,6 +106,24 @@ STYLES = {
         ),
         "vibe_hint": "Transported-to-another-world. Status windows, level-ups, guilds, party banter, game-logic worldbuilding.",
     },
+    "castlevania": {
+        "name": "Castlevania (Netflix)",
+        "badge": "CV",
+        "image_suffix": (
+            "Netflix Castlevania anime art style, Powerhouse Animation Studios quality, "
+            "gothic horror aesthetic, medieval Wallachia setting, candlelit stone cathedrals, "
+            "blood moon skies, baroque architecture, intricate Belmont whip detail, "
+            "vampire lord regalia, alchemical glyphs, deep crimson and obsidian palette with gold accents, "
+            "fluid hand-drawn combat animation feel, dynamic motion smears, dramatic chiaroscuro lighting, "
+            "painterly backgrounds, 4K, cinematic dark fantasy composition"
+        ),
+        "vibe_hint": (
+            "Gothic horror dark fantasy, Netflix Castlevania tone. Vampires, hunters, alchemists, "
+            "speakers of the dead. Whip combat, magic glyphs, cathedrals, demon courts. "
+            "Mature, witty, foul-mouthed banter under existential dread. Visceral fight choreography, "
+            "blood is a design element. Romantic gothic intensity. Long brooding monologues offset by sharp gallows humor."
+        ),
+    },
 }
 
 DEFAULT_STYLE = "solo_leveling"

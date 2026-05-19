@@ -1472,16 +1472,15 @@ def _do_scene_video(key: str, prompt: str, seed: int, image_url: str,
 
 
 def _gc_scene_video_jobs():
-    """Trim oldest entries when the jobs dict exceeds the bound. Keeps the
-    server from accumulating unbounded job state across long uptimes."""
-    with _SCENE_VIDEO_JOBS_LOCK:
-        if len(scene_video_jobs) <= _SCENE_VIDEO_JOBS_MAX:
-            return
-        # Sort by created_at (older first) and drop the excess
-        items = sorted(scene_video_jobs.items(), key=lambda kv: kv[1].get("created_at", 0))
-        excess = len(scene_video_jobs) - _SCENE_VIDEO_JOBS_MAX
-        for k, _ in items[:excess]:
-            scene_video_jobs.pop(k, None)
+    """Trim oldest entries when the jobs dict exceeds the bound.
+    Must be called while _SCENE_VIDEO_JOBS_LOCK is already held —
+    do NOT acquire the lock here (threading.Lock is not reentrant)."""
+    if len(scene_video_jobs) <= _SCENE_VIDEO_JOBS_MAX:
+        return
+    items = sorted(scene_video_jobs.items(), key=lambda kv: kv[1].get("created_at", 0))
+    excess = len(scene_video_jobs) - _SCENE_VIDEO_JOBS_MAX
+    for k, _ in items[:excess]:
+        scene_video_jobs.pop(k, None)
 
 
 @app.route("/scene-video/start", methods=["POST"])
