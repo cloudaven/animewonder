@@ -1447,11 +1447,24 @@ def _do_scene_video(key: str, prompt: str, seed: int, image_url: str,
         comfy_job = {"start_time": time.time(), "message": "", "elapsed_seconds": 0}
         job.update({"status": "generating", "progress": 30,
                     "message": "Generating motion on local GPU…"})
-        vid_path = animate_scene_comfy(img_path, prompt, tmp, 0, comfy_job)
+        # Scene viewer uses 81 frames (3.4 sec @ 24fps) — longer than the
+        # 49-frame export default because it's a single clip, not a multi-scene
+        # MoviePy assembly. More frames = more native motion to interpolate from.
+        vid_path = animate_scene_comfy(img_path, prompt, tmp, 0, comfy_job, length=81)
         if not vid_path or not os.path.exists(vid_path):
             job.update({"status": "failed",
                         "message": "GPU unavailable (PC asleep, tunnel down, or comfy locked)"})
             return
+
+        # Post-pass: ffmpeg motion-interpolate 24fps → 48fps for buttery feel.
+        # minterpolate (mci+bidir) synthesizes intermediate frames using motion
+        # estimation; for anime content with smooth camera+effects motion it's
+        # clean. Falls back to the raw clip if anything goes wrong — never block
+        # the user's video on a smoothness post-process.
+        job.update({"progress": 80, "message": "Smoothing to 48fps…"})
+        smooth_path = os.path.join(tmp, f"smooth_{int(time.time())}.mp4")
+        if _interpolate_to_48fps(vid_path, smooth_path):
+            vid_path = smooth_path
 
         # Move into the persistent cache atomically (rename within same filesystem).
         dst = os.path.join(SCENE_VIDEO_CACHE_DIR, f"{key}.mp4")
@@ -1857,12 +1870,61 @@ def _comfy_headers() -> dict:
     return h
 
 
-def animate_scene_comfy(img_path, prompt, tmp_dir, scene_idx, job):
+_FFMPEG_BIN: str | None = None
+
+def _ffmpeg_path() -> str | None:
+    """Resolve ffmpeg lazily and cache. Tries PATH first, then the binary
+    that ships with imageio-ffmpeg (already a transitive dep via moviepy)."""
+    global _FFMPEG_BIN
+    if _FFMPEG_BIN is not None:
+        return _FFMPEG_BIN or None
+    found = shutil.which("ffmpeg")
+    if not found:
+        try:
+            import imageio_ffmpeg
+            found = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            found = None
+    _FFMPEG_BIN = found or ""
+    return found
+
+
+def _interpolate_to_48fps(src: str, dst: str) -> bool:
+    """Motion-interpolate src 24fps mp4 -> dst 48fps mp4 using ffmpeg
+    minterpolate (mci + bidir). Returns True on success, False on any failure
+    so callers can fall back to the original clip without raising."""
+    ff = _ffmpeg_path()
+    if not ff or not os.path.exists(src):
+        return False
+    cmd = [
+        ff, "-y", "-loglevel", "error",
+        "-i", src,
+        "-vf", "minterpolate=fps=48:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-preset", "veryfast", "-crf", "20",
+        "-an",
+        dst,
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=180)
+        if proc.returncode == 0 and os.path.exists(dst) and os.path.getsize(dst) > 10_000:
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def animate_scene_comfy(img_path, prompt, tmp_dir, scene_idx, job, length: int = 49):
     """Animate a scene using the local ComfyUI tunnel (admin tier path).
 
     Returns the MP4 path on success, None on failure (circuit breaker trips
     on connection errors so callers can fall through to fal.ai or static art).
     Total request takes ~3-5 minutes on the 4070 Ti SUPER for a 5-sec clip.
+
+    `length` is the Wan22ImageToVideoLatent frame count; valid values satisfy
+    (length-1) %% 4 == 0 (49 = 2s, 81 = 3.4s, 121 = 5s at 24fps). Export path
+    keeps length=49 to fit Render's 512 MB worker; scene-viewer path uses 81
+    for a smoother feel since it's only one clip at a time.
     """
     if not COMFY_LOCAL_URL or _comfy_locked():
         return None
@@ -1884,7 +1946,7 @@ def animate_scene_comfy(img_path, prompt, tmp_dir, scene_idx, job):
 
         # Submit the workflow. ComfyUI returns a prompt_id we then poll for.
         seed = abs(hash((img_path, scene_idx))) % 100000
-        workflow = _comfy_workflow_wan22_i2v(uploaded_name, prompt, seed)
+        workflow = _comfy_workflow_wan22_i2v(uploaded_name, prompt, seed, length=length)
         job["message"] = f"Scene {scene_idx+1} — generating on local GPU…"
         sub = http.post(f"{base}/prompt",
                         json={"prompt": workflow, "client_id": "animeforge"},
