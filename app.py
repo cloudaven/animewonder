@@ -1474,14 +1474,15 @@ def _do_scene_video(key: str, prompt: str, seed: int, image_url: str,
                         "message": "Animation unavailable — fal.ai exhausted and local GPU offline"})
             return
 
-        # Post-pass: ffmpeg motion-interpolate 24fps → 48fps for buttery feel.
-        # minterpolate (mci+bidir) synthesizes intermediate frames using motion
-        # estimation; for anime content with smooth camera+effects motion it's
-        # clean. Falls back to the raw clip if anything goes wrong — never block
-        # the user's video on a smoothness post-process.
-        job.update({"progress": 80, "message": "Smoothing to 48fps…"})
+        # Post-pass: ffmpeg motion-interpolate native 24fps → TARGET_FPS (60) for
+        # truly fluent motion. minterpolate (mci+bidir+aobmc+vsbmc) synthesizes
+        # intermediate frames using motion estimation; for anime content with
+        # smooth camera+effects motion it produces clean inbetweens. Falls back
+        # to the raw clip if anything goes wrong — never block the user's video
+        # on a smoothness post-process.
+        job.update({"progress": 80, "message": f"Smoothing to {TARGET_FPS}fps…"})
         smooth_path = os.path.join(tmp, f"smooth_{int(time.time())}.mp4")
-        if _interpolate_to_48fps(vid_path, smooth_path):
+        if _interpolate_to_target_fps(vid_path, smooth_path):
             vid_path = smooth_path
 
         # Move into the persistent cache atomically (rename within same filesystem).
@@ -1907,29 +1908,48 @@ def _ffmpeg_path() -> str | None:
     return found
 
 
-def _interpolate_to_48fps(src: str, dst: str) -> bool:
-    """Motion-interpolate src 24fps mp4 -> dst 48fps mp4 using ffmpeg
-    minterpolate (mci + bidir). Returns True on success, False on any failure
-    so callers can fall back to the original clip without raising."""
+# Target output frame rate for every animated clip — both per-scene previews
+# and the final exported movie. Wan 2.5 / Wan 2.2 both emit 24fps native, so
+# we motion-interpolate every clip up to TARGET_FPS before encoding. 60 is the
+# minimum that feels truly fluent; 48 still reads as cinema-cadence on fast
+# motion which Justen flagged as wonky.
+TARGET_FPS = 60
+
+def _interpolate_to_target_fps(src: str, dst: str, target_fps: int = TARGET_FPS) -> bool:
+    """Motion-interpolate src mp4 -> dst mp4 at target_fps using ffmpeg
+    minterpolate (mci + bidir + advanced obmc + variable-size block matching).
+    Returns True on success, False on any failure so callers can fall back to
+    the original clip without raising.
+
+    Timeout is generous because at 60fps target we synthesize 2.5x the source
+    frames, and on Render's shared CPU a 5-sec 720p clip can take 60-90 sec.
+    The export loop calls this per scene serially — that adds real time to a
+    15-scene movie, but Justen explicitly chose smoothness over speed."""
     ff = _ffmpeg_path()
     if not ff or not os.path.exists(src):
         return False
     cmd = [
         ff, "-y", "-loglevel", "error",
         "-i", src,
-        "-vf", "minterpolate=fps=48:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1",
+        "-vf", f"minterpolate=fps={target_fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1",
         "-c:v", "libx264", "-pix_fmt", "yuv420p",
         "-preset", "veryfast", "-crf", "20",
         "-an",
         dst,
     ]
     try:
-        proc = subprocess.run(cmd, capture_output=True, timeout=180)
+        proc = subprocess.run(cmd, capture_output=True, timeout=300)
         if proc.returncode == 0 and os.path.exists(dst) and os.path.getsize(dst) > 10_000:
             return True
         return False
     except Exception:
         return False
+
+
+# Kept as a back-compat alias so any external caller / future code referencing
+# the old name still works after the 48→60 bump.
+def _interpolate_to_48fps(src: str, dst: str) -> bool:
+    return _interpolate_to_target_fps(src, dst, target_fps=TARGET_FPS)
 
 
 def animate_scene_comfy(img_path, prompt, tmp_dir, scene_idx, job, length: int = 49):
@@ -2162,6 +2182,17 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
                     job["message"] = f"Scene {i+1}/{n} — fal.ai balance exhausted, using static art"
                 # Else: no FAL_KEY and not local — just use static
 
+                # ── Step 2b: motion-interpolate animated clips to TARGET_FPS ──
+                # Wan / Kling deliver 24fps natively; the FFmpeg zoompan path is
+                # already 30fps. Interpolating zoompan would be wasted work, so
+                # only smooth the real-motion paths. Silent fallback to the raw
+                # clip on any failure so a single bad scene can't tank the export.
+                if vid_path and anim_model in ("wan", "kling", "comfy_local"):
+                    smooth_path = os.path.join(tmp, f"smooth_{i:03d}.mp4")
+                    job["message"] = f"Scene {i+1}/{n} — smoothing to {TARGET_FPS}fps…"
+                    if _interpolate_to_target_fps(vid_path, smooth_path):
+                        vid_path = smooth_path
+
             # ── Step 3: Build TTS audio ──
             audio_path = os.path.join(tmp, f"audio_{i}.mp3")
             tts_parts  = [f"{sc.get('title','')}. {sc.get('action','')}"]
@@ -2200,8 +2231,11 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
                 pass
 
             scene_out = os.path.join(tmp, f"final_scene_{i:03d}.mp4")
+            # Final encode at TARGET_FPS (60) so the stitched output preserves
+            # the interpolated smoothness. Static-image scenes get duplicated
+            # frames at 60fps — slightly larger file, no visual cost.
             clip.write_videofile(
-                scene_out, fps=30, codec="libx264", audio_codec="aac",
+                scene_out, fps=TARGET_FPS, codec="libx264", audio_codec="aac",
                 threads=2, preset="ultrafast", logger=None,
             )
             # Release frame buffers before next scene
@@ -2217,7 +2251,7 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
         job["message"]     = f"Stitching {n} scenes into final {quality.upper()} video…"
         job["scenes_done"] = n
         safe     = "".join(c for c in story.get("title", "anime") if c.isalnum() or c in " _-")[:40]
-        out_name = f"{safe.strip()}_{quality}{anim_tag}_30fps.mp4"
+        out_name = f"{safe.strip()}_{quality}{anim_tag}_{TARGET_FPS}fps.mp4"
         out_path = os.path.join(tmp, out_name)
 
         encode_done = threading.Event()
@@ -2272,7 +2306,7 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
         elapsed = time.time() - job["start_time"]
         job.update({
             "file_path": out_path, "file_name": out_name, "status": "complete",
-            "progress": 100, "message": f"Your {quality.upper()} 30fps video is ready!",
+            "progress": 100, "message": f"Your {quality.upper()} {TARGET_FPS}fps video is ready!",
             "tmp_dir": tmp, "elapsed_seconds": int(elapsed), "eta_seconds": 0,
         })
         # Write disk manifest so the download endpoint can find the file

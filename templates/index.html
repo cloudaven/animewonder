@@ -612,7 +612,7 @@
     <div class="hero-content">
       <div class="hero-title">ANIMEWONDER</div>
       <div class="hero-jp">アニメ創造エンジン</div>
-      <div class="hero-tier">{% if is_admin %}★ ADMIN · UNLIMITED · 4K · 30FPS{% elif tier == 'monarch' %}S-RANK MONARCH · {{ used }}/{{ limit }} · 4K · 30FPS{% elif tier == 'hunter' %}B-RANK HUNTER · {{ used }}/{{ limit }} · 1080P · 30FPS{% else %}FREE · {{ used }}/{{ limit }} · <a href="/upgrade">UPGRADE ↗</a>{% endif %}</div>
+      <div class="hero-tier">{% if is_admin %}★ ADMIN · UNLIMITED · 4K · 60FPS{% elif tier == 'monarch' %}S-RANK MONARCH · {{ used }}/{{ limit }} · 4K · 60FPS{% elif tier == 'hunter' %}B-RANK HUNTER · {{ used }}/{{ limit }} · 1080P · 60FPS{% else %}FREE · {{ used }}/{{ limit }} · <a href="/upgrade">UPGRADE ↗</a>{% endif %}</div>
       <div style="margin-top:8px"><a href="/animation-preview" target="_blank" style="display:inline-block;font-family:'Orbitron',sans-serif;font-size:.6rem;letter-spacing:.22em;color:var(--gold);background:rgba(255,204,0,.08);border:1px solid rgba(255,204,0,.4);border-radius:6px;padding:5px 12px;text-decoration:none;">🎬 LIVE ANIMATION DEMO ↗</a></div>
 
       <div class="create-card">
@@ -804,11 +804,11 @@
       <div class="exp-quality-row">
         <button class="eq-btn active" data-q="1080p" onclick="setQuality(this)">
           <span class="eq-icon">🎬</span><span class="eq-name">1080p</span>
-          <span class="eq-fps">30fps · Full HD</span>
+          <span class="eq-fps">60fps · Full HD</span>
         </button>
         <button class="eq-btn {% if tier not in ('monarch','admin') %}eq-locked{% endif %}" data-q="4k" onclick="setQuality(this)">
           <span class="eq-icon">✦</span><span class="eq-name">4K UHD</span>
-          <span class="eq-fps">30fps · 3840×2160{% if tier not in ('monarch','admin') %} · Monarch+{% endif %}</span>
+          <span class="eq-fps">60fps · 3840×2160{% if tier not in ('monarch','admin') %} · Monarch+{% endif %}</span>
         </button>
         <button class="eq-btn" id="eq-animate-btn" data-animate="0" onclick="toggleAnimate(this)">
           <span class="eq-icon">🎌</span><span class="eq-name">ANIMATE</span>
@@ -818,7 +818,7 @@
       <div class="exp-info-row">
         <span>📹 <span id="exp-scene-count-preview">0</span> scenes</span>
         <span>⏱ ~<span id="exp-time-est">—</span> min</span>
-        <span>🎞 30fps</span>
+        <span>🎞 60fps</span>
       </div>
       <button class="btn-primary" style="margin-top:10px;font-size:.76rem;padding:12px" onclick="confirmExport()">▶ START RENDERING</button>
       <br><button class="btn-cancel" onclick="closeExport()">Cancel</button>
@@ -1669,7 +1669,7 @@
   async function confirmExport(){
     document.getElementById('exp-stage-preview').style.display='none';
     document.getElementById('exp-stage-render').style.display='';
-    document.getElementById('exp-quality-label').textContent=exportQuality.toUpperCase()+(exportAnimate?' · PIKA 2.0 ANIMATED':' · 30FPS');
+    document.getElementById('exp-quality-label').textContent=exportQuality.toUpperCase()+(exportAnimate?' · PIKA 2.0 ANIMATED':' · 60FPS');
     document.getElementById('exp-msg').textContent='Starting export...';
     document.getElementById('exp-bar').style.width='0%';
     document.getElementById('exp-pct').textContent='0%';
