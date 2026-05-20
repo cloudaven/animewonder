@@ -1451,27 +1451,27 @@ def _do_scene_video(key: str, prompt: str, seed: int, image_url: str,
         # elapsed_seconds into it for the export status feed).
         sub_job = {"start_time": time.time(), "message": "", "elapsed_seconds": 0}
 
-        # Try fal.ai Wan 2.5 first. The local Wan 2.2 5B produces stiff motion
-        # and admin shouldn't see worse output than paying users do — Justen
-        # explicitly wants fluent over free for the preview. comfy_local stays
-        # as a fallback only when fal.ai isn't configured or is circuit-broken.
+        # Try local GPU first — it's free for admin and Justen's fal.ai balance
+        # is the gating issue on this account. The 60fps interpolation pass
+        # downstream smooths the 5B output so motion is clean either way.
+        # fal.ai stays as a backup when the home GPU is offline.
         vid_path = None
-        if FAL_KEY and not _fal_locked():
-            job.update({"status": "generating", "progress": 30,
-                        "message": "Generating fluent motion with Wan 2.5…"})
-            vid_path = animate_scene_fal(img_path, prompt, tmp, 0, sub_job, model="wan")
-
-        if (not vid_path or not os.path.exists(vid_path)) and COMFY_LOCAL_URL and not _comfy_locked():
+        if COMFY_LOCAL_URL and not _comfy_locked():
             # Scene viewer uses 81 frames (3.4 sec @ 24fps) — longer than the
             # 49-frame export default because it's a single clip, not a multi-scene
             # MoviePy assembly. More frames = more native motion to interpolate from.
             job.update({"status": "generating", "progress": 30,
-                        "message": "fal.ai unavailable, falling back to local GPU…"})
+                        "message": "Generating motion on local GPU…"})
             vid_path = animate_scene_comfy(img_path, prompt, tmp, 0, sub_job, length=81)
+
+        if (not vid_path or not os.path.exists(vid_path)) and FAL_KEY and not _fal_locked():
+            job.update({"status": "generating", "progress": 30,
+                        "message": "Local GPU offline, falling back to fal.ai Wan 2.5…"})
+            vid_path = animate_scene_fal(img_path, prompt, tmp, 0, sub_job, model="wan")
 
         if not vid_path or not os.path.exists(vid_path):
             job.update({"status": "failed",
-                        "message": "Animation unavailable — fal.ai exhausted and local GPU offline"})
+                        "message": "Animation unavailable — local GPU offline and fal.ai exhausted"})
             return
 
         # Post-pass: ffmpeg motion-interpolate native 24fps → TARGET_FPS (60) for
@@ -2363,11 +2363,14 @@ def start_export():
     if anim_model == "comfy_local" and tier != "admin":
         anim_model = "wan"
     if not anim_model:
-        # Default to fal.ai Wan whenever FAL_KEY is set, for every tier including
-        # admin. The local GPU path is opt-in only (frontend would have to pass
-        # anim_model="comfy_local" explicitly) — we don't want admin previews to
-        # look wonky just because the home GPU happens to be online.
-        if FAL_KEY and tier in ("admin", "monarch", "hunter"):
+        # Admin always prefers the home GPU when its tunnel URL is set —
+        # that's the whole point of the local rig: free unlimited animation.
+        # Paying tiers go to fal.ai Wan for consistent latency. The 60fps
+        # motion-interpolation pass applies to comfy_local output too, so
+        # the home GPU's 5B clips get smoothed before they reach the user.
+        if tier == "admin" and COMFY_LOCAL_URL:
+            anim_model = "comfy_local"
+        elif FAL_KEY and tier in ("admin", "monarch", "hunter"):
             anim_model = "wan"
         else:
             anim_model = "local"
@@ -2376,10 +2379,11 @@ def start_export():
         anim_model = "wan"
     if anim_model in ("wan", "kling") and not FAL_KEY:
         anim_model = "local"   # no key → free fallback
-    # (Previous behavior force-rewrote admin's wan/kling requests to comfy_local
-    # whenever the tunnel URL was set. Removed: that's exactly what was making
-    # admin exports look wonky. Admin who wants the home GPU must now pick
-    # comfy_local explicitly.)
+    # Admin override: if the frontend defaulted to "wan"/"kling" but the home
+    # GPU tunnel is up, route to local instead — admin shouldn't burn fal.ai
+    # credits when free local hardware is available.
+    if tier == "admin" and COMFY_LOCAL_URL and anim_model in ("wan", "kling"):
+        anim_model = "comfy_local"
     if quality == "4k" and tier not in ("monarch", "admin"):
         quality = "1080p"
     if animate and not FAL_KEY and anim_model not in ("local", "comfy_local"):
