@@ -84,9 +84,11 @@ PACKS = {
 FAL_KEY = os.environ.get("FAL_KEY", "")
 
 # Local ComfyUI bridge (Justen's RTX 4070 Ti SUPER exposed via cloudflared tunnel).
-# When set, admin tier routes animation here instead of paying fal.ai. URL changes
-# each time the cloudflared quick tunnel restarts; token is a long random string
-# the local startup script generates once and AnimeForge sends in every request.
+# Opt-in only. Default routing is fal.ai Wan API for everyone because the local
+# Wan 2.2 5B has visibly stiff motion vs. fal.ai's hosted Wan 2.5; we don't want
+# admin previews to look worse than what paying users get. URL changes each time
+# the cloudflared quick tunnel restarts; token is a long random string the local
+# startup script generates once and AnimeWonder sends in every request.
 COMFY_LOCAL_URL   = os.environ.get("COMFY_LOCAL_URL", "").rstrip("/")
 COMFY_LOCAL_TOKEN = os.environ.get("COMFY_LOCAL_TOKEN", "")
 
@@ -120,7 +122,10 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "users.db")
 
 # Allow override for production hosts (Render, Fly, etc.) where the only writeable
 # location may be a mounted persistent disk, not the source folder.
-DB_PATH = os.environ.get("ANIMEFORGE_DB_PATH", DB_PATH)
+# ANIMEFORGE_DB_PATH kept as the legacy fallback so the live Render env var
+# keeps working through the rename; ANIMEWONDER_DB_PATH wins if both are set.
+DB_PATH = os.environ.get("ANIMEWONDER_DB_PATH",
+                         os.environ.get("ANIMEFORGE_DB_PATH", DB_PATH))
 
 TIER_LIMITS = {"free": 2, "hunter": 5, "monarch": 100}
 SEASON_TIERS = {"monarch", "admin"}
@@ -495,7 +500,7 @@ def create_paypal_order():
                 "intent": "CAPTURE",
                 "purchase_units": [{
                     "amount": {"currency_code": "USD", "value": p["price"]},
-                    "description": f"AnimeForge {pack.title()} Pack — {p['credits']} story generations",
+                    "description": f"AnimeWonder {pack.title()} Pack — {p['credits']} story generations",
                 }],
             },
             timeout=15,
@@ -1442,18 +1447,31 @@ def _do_scene_video(key: str, prompt: str, seed: int, image_url: str,
         with open(img_path, "wb") as fh:
             fh.write(img_bytes)
 
-        # Fake "job" dict shape that animate_scene_comfy expects (it writes
-        # message/elapsed_seconds into it for the export status feed).
-        comfy_job = {"start_time": time.time(), "message": "", "elapsed_seconds": 0}
-        job.update({"status": "generating", "progress": 30,
-                    "message": "Generating motion on local GPU…"})
-        # Scene viewer uses 81 frames (3.4 sec @ 24fps) — longer than the
-        # 49-frame export default because it's a single clip, not a multi-scene
-        # MoviePy assembly. More frames = more native motion to interpolate from.
-        vid_path = animate_scene_comfy(img_path, prompt, tmp, 0, comfy_job, length=81)
+        # Fake "job" dict shape both backends expect (they write message /
+        # elapsed_seconds into it for the export status feed).
+        sub_job = {"start_time": time.time(), "message": "", "elapsed_seconds": 0}
+
+        # Try fal.ai Wan 2.5 first. The local Wan 2.2 5B produces stiff motion
+        # and admin shouldn't see worse output than paying users do — Justen
+        # explicitly wants fluent over free for the preview. comfy_local stays
+        # as a fallback only when fal.ai isn't configured or is circuit-broken.
+        vid_path = None
+        if FAL_KEY and not _fal_locked():
+            job.update({"status": "generating", "progress": 30,
+                        "message": "Generating fluent motion with Wan 2.5…"})
+            vid_path = animate_scene_fal(img_path, prompt, tmp, 0, sub_job, model="wan")
+
+        if (not vid_path or not os.path.exists(vid_path)) and COMFY_LOCAL_URL and not _comfy_locked():
+            # Scene viewer uses 81 frames (3.4 sec @ 24fps) — longer than the
+            # 49-frame export default because it's a single clip, not a multi-scene
+            # MoviePy assembly. More frames = more native motion to interpolate from.
+            job.update({"status": "generating", "progress": 30,
+                        "message": "fal.ai unavailable, falling back to local GPU…"})
+            vid_path = animate_scene_comfy(img_path, prompt, tmp, 0, sub_job, length=81)
+
         if not vid_path or not os.path.exists(vid_path):
             job.update({"status": "failed",
-                        "message": "GPU unavailable (PC asleep, tunnel down, or comfy locked)"})
+                        "message": "Animation unavailable — fal.ai exhausted and local GPU offline"})
             return
 
         # Post-pass: ffmpeg motion-interpolate 24fps → 48fps for buttery feel.
@@ -2286,13 +2304,11 @@ def start_export():
         style_key = DEFAULT_STYLE
     # Animation model selection. "local" = free FFmpeg zoompan (Ken Burns; not real
     # motion — what Justen called "back and forth"). "wan" = fal.ai Wan 2.5 real
-    # anime motion (~$0.25/clip). "kling" = premium Kling 1.6 Pro (~$0.35/clip).
-    # "comfy_local" = Justen's home RTX 4070 Ti SUPER via Cloudflare tunnel
-    # (free for him, slower than fal.ai, gated to admin tier so paying users
-    # don't queue behind him on his single GPU).
-    # Admin tier prefers comfy_local when the tunnel URL is configured —
-    # that's the whole point of Justen's setup: free Wan 2.2 5B animations on
-    # his own hardware, with fal.ai as the fallback when his PC is asleep.
+    # anime motion (~$0.25/clip), fluent and the default for everyone. "kling" =
+    # premium Kling 1.6 Pro (~$0.35/clip). "comfy_local" = Justen's home RTX 4070
+    # Ti SUPER running Wan 2.2 5B — opt-in only, never the default, because the
+    # 5B model produces visibly stiff motion compared to fal.ai's hosted Wan 2.5
+    # and admin should see the same fluent output everyone else sees.
     anim_model = (data.get("anim_model") or "").strip()
     if anim_model not in ("local", "wan", "kling", "comfy_local"):
         anim_model = ""  # empty → tier default below
@@ -2301,11 +2317,11 @@ def start_export():
     if anim_model == "comfy_local" and tier != "admin":
         anim_model = "wan"
     if not anim_model:
-        if tier == "admin" and COMFY_LOCAL_URL:
-            anim_model = "comfy_local"
-        elif tier == "admin" and FAL_KEY:
-            anim_model = "wan"
-        elif tier == "monarch" and FAL_KEY:
+        # Default to fal.ai Wan whenever FAL_KEY is set, for every tier including
+        # admin. The local GPU path is opt-in only (frontend would have to pass
+        # anim_model="comfy_local" explicitly) — we don't want admin previews to
+        # look wonky just because the home GPU happens to be online.
+        if FAL_KEY and tier in ("admin", "monarch", "hunter"):
             anim_model = "wan"
         else:
             anim_model = "local"
@@ -2314,14 +2330,10 @@ def start_export():
         anim_model = "wan"
     if anim_model in ("wan", "kling") and not FAL_KEY:
         anim_model = "local"   # no key → free fallback
-    # Admin override: if the home GPU tunnel is configured, always prefer it
-    # over fal.ai paid paths — admin's whole point is generating for free on
-    # his own hardware. Frontend hardcodes "kling" / "wan" for premium-capable
-    # users, so without this override admin would always pay even when his
-    # GPU is live. fal.ai still kicks in as fallback inside do_export() if the
-    # tunnel call fails.
-    if tier == "admin" and COMFY_LOCAL_URL and anim_model in ("wan", "kling"):
-        anim_model = "comfy_local"
+    # (Previous behavior force-rewrote admin's wan/kling requests to comfy_local
+    # whenever the tunnel URL was set. Removed: that's exactly what was making
+    # admin exports look wonky. Admin who wants the home GPU must now pick
+    # comfy_local explicitly.)
     if quality == "4k" and tier not in ("monarch", "admin"):
         quality = "1080p"
     if animate and not FAL_KEY and anim_model not in ("local", "comfy_local"):

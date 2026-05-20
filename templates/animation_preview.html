@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>AnimeForge — Live Animation Preview</title>
+<title>AnimeWonder — Live Animation Preview</title>
 <meta name="description" content="Live anime-style fighter animation demo. Themed across 10 anime visual modes — dash, punch, projectile blast, impact burst, camera shake." />
 
 <!--
@@ -11,9 +11,9 @@
     - Tailwind v3 CDN (JIT) for utility classes inc. arbitrary-value syntax like w-[58px]
     - React 19 + framer-motion 11 via esm.sh ES modules
     - Babel standalone compiles the JSX inline at page-load time (no build step needed
-      because AnimeForge has no JS build pipeline — it's a Flask template repo)
+      because AnimeWonder has no JS build pipeline — it's a Flask template repo)
 
-  Justen pasted this code originally targeting create-react-app / Vite. Since AnimeForge
+  Justen pasted this code originally targeting create-react-app / Vite. Since AnimeWonder
   is a server-rendered Flask app, the CDN+Babel trick is the lowest-friction way to drop
   his React component into the existing template repo without spinning up a sub-project.
 -->
@@ -34,9 +34,9 @@
 </head>
 <body>
 
-<!-- Tiny back-link so users can return to AnimeForge -->
+<!-- Tiny back-link so users can return to AnimeWonder -->
 <div class="fixed top-4 right-4 z-[200] flex gap-2">
-  <a href="/" class="px-3 py-2 rounded-xl text-xs bg-black/70 border border-white/30 hover:bg-white/10 transition">← Back to AnimeForge</a>
+  <a href="/" class="px-3 py-2 rounded-xl text-xs bg-black/70 border border-white/30 hover:bg-white/10 transition">← Back to AnimeWonder</a>
 </div>
 
 <div id="root"></div>
