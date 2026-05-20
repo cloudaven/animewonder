@@ -1610,6 +1610,17 @@ def scene_video_file(key):
 MIN_DUR = {"episode":15,"short":30,"movie":90}
 ANIM_CLIP_DUR = 5   # seconds per scene clip
 
+# Wan 2.5 native output resolution. fal.ai prices it tiered:
+#   480p  → $0.05/sec ($0.25 per 5-sec clip)  — low res, motion looks rougher
+#   720p  → $0.10/sec ($0.50 per 5-sec clip)  — default, what create.wan.video uses
+#   1080p → $0.15/sec ($0.75 per 5-sec clip)  — sharpest, 3x cost
+# Override via env var WAN_RESOLUTION when willing to pay more for sharper motion.
+# Resolution affects perceived smoothness: higher res = less aliasing on fast
+# motion, so 720p reads noticeably more fluent than 480p even with the same fps.
+WAN_RESOLUTION = os.environ.get("WAN_RESOLUTION", "720p").strip().lower()
+if WAN_RESOLUTION not in ("480p", "720p", "1080p"):
+    WAN_RESOLUTION = "720p"
+
 
 def _build_scene_image_prompt(scene, characters_by_name, style_suffix):
     """
@@ -1763,17 +1774,18 @@ def animate_scene_fal(img_path, prompt, tmp_dir, scene_idx, job, model="wan"):
             }
             job["message"] = f"Scene {scene_idx+1} — animating with Kling Pro…"
         else:
-            # Wan 2.5 — default; cheaper and tuned well for anime stills.
-            # 480p keeps cost down; viewers won't notice on a 5-sec clip
-            # composited into a 1080p timeline.
+            # Wan 2.5 — same model create.wan.video runs in their explore page.
+            # Resolution is configurable via WAN_RESOLUTION env var (480p / 720p /
+            # 1080p). Default 720p because 480p had visibly rough motion and
+            # 1080p triples the cost; 720p matches what the official site uses.
             endpoint = "fal-ai/wan-25-preview/image-to-video"
             args = {
                 "image_url":  fal_img_url,
                 "prompt":     clean_prompt,
-                "resolution": "480p",
+                "resolution": WAN_RESOLUTION,
                 "duration":   str(ANIM_CLIP_DUR),
             }
-            job["message"] = f"Scene {scene_idx+1} — animating with Wan 2.5…"
+            job["message"] = f"Scene {scene_idx+1} — animating with Wan 2.5 @ {WAN_RESOLUTION}…"
 
         # subscribe() blocks until complete and handles all polling internally
         result = fal_client.subscribe(endpoint, arguments=args, with_logs=False)
