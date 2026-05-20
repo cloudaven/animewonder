@@ -14,7 +14,7 @@
 
 services:
   - type: web
-    name: animeforge
+    name: animewonder
     runtime: python
     plan: free
     region: oregon  # closest free region; change if you have latency-sensitive users elsewhere

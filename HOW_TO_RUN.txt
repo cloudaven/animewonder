@@ -1,5 +1,5 @@
 ============================================================
-  ANIMEFORGE — COMPLETE SETUP GUIDE
+  ANIMEWONDER — COMPLETE SETUP GUIDE
 ============================================================
 
 STEP 1 — Install Python packages

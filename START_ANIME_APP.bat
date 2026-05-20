@@ -1,9 +1,9 @@
 @echo off
-title AnimeForge
+title AnimeWonder
 cd /d "%~dp0"
 echo.
 echo  ========================================
-echo    ANIMEFORGE  -  Starting up...
+echo    ANIMEWONDER  -  Starting up...
 echo  ========================================
 echo.
 echo  Server: http://localhost:5000
