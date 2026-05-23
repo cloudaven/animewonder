@@ -1099,7 +1099,9 @@ def index():
                            is_admin=session.get("is_admin",False),
                            email=session.get("email",""),
                            tier=tier, used=used, limit=limit,
-                           paypal_client_id=PAYPAL_CLIENT_ID)
+                           paypal_client_id=PAYPAL_CLIENT_ID,
+                           fal_ok=bool(FAL_KEY),
+                           comfy_local_ok=bool(COMFY_LOCAL_URL))
 
 
 @app.route("/generate", methods=["POST"])
@@ -2811,14 +2813,14 @@ def admin_panel():
             "projects": db.execute("SELECT COUNT(*) FROM projects").fetchone()[0],
             "seasons":  db.execute("SELECT COUNT(*) FROM seasons").fetchone()[0],
         }
-    pp_ok   = bool(PAYPAL_CLIENT_ID and PAYPAL_SECRET and PAYPAL_PLAN_HUNTER and PAYPAL_PLAN_MONARCH)
-    pika_ok = bool(FAL_KEY)
+    pp_ok  = bool(PAYPAL_CLIENT_ID and PAYPAL_SECRET and PAYPAL_PLAN_HUNTER and PAYPAL_PLAN_MONARCH)
+    fal_ok = bool(FAL_KEY)
     return render_template("admin.html",
                            users=[dict(u) for u in users],
                            stats=stats,
                            pp_ok=pp_ok,
                            pp_mode=PAYPAL_MODE,
-                           pika_ok=pika_ok,
+                           fal_ok=fal_ok,
                            email=session.get("email", ""))
 
 

@@ -205,7 +205,7 @@
   <div class="store-card" style="margin-top:14px">
     <div class="store-header">
       <div class="store-title">// Kling Animation (fal.ai)</div>
-      {% if pika_ok %}
+      {% if fal_ok %}
         <span class="store-badge badge-live">CONFIGURED ✓</span>
       {% else %}
         <span class="store-badge badge-uncfg">NOT CONFIGURED</span>
@@ -214,8 +214,8 @@
     <div class="store-grid">
       <div class="store-field">
         <div class="sf-lbl">API Key</div>
-        <div class="sf-val {% if pika_ok %}ok{% else %}missing{% endif %}">
-          {% if pika_ok %}Set ✓{% else %}Missing ✗{% endif %}
+        <div class="sf-val {% if fal_ok %}ok{% else %}missing{% endif %}">
+          {% if fal_ok %}Set ✓{% else %}Missing ✗{% endif %}
         </div>
       </div>
       <div class="store-field">
@@ -231,7 +231,7 @@
         <div class="sf-val ok">1080p</div>
       </div>
     </div>
-    {% if not pika_ok %}
+    {% if not fal_ok %}
     <div class="env-hint">
       Animation runs <strong>free on your RTX 4070 Ti SUPER</strong> (no API key needed).<br>
       Hit <strong>ANIMATE</strong> in the export overlay — Wan 2.2 5B I2V runs locally via the ComfyUI tunnel.<br><br>

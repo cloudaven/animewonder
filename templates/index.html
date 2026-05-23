@@ -812,7 +812,7 @@
         </button>
         <button class="eq-btn" id="eq-animate-btn" data-animate="0" onclick="toggleAnimate(this)">
           <span class="eq-icon">🎌</span><span class="eq-name">ANIMATE</span>
-          <span class="eq-fps" id="eq-animate-fps">Wan 2.5 · requires key</span>
+          <span class="eq-fps" id="eq-animate-fps">— · ready</span>
         </button>
       </div>
       <div class="exp-info-row">
@@ -864,10 +864,24 @@
   let libLoaded=false, libTab='stories';
   const CAN_4K = {{ 'true' if tier in ('monarch','admin') else 'false' }};
   const CAN_PREMIUM_ANIM = {{ 'true' if tier in ('monarch','admin') else 'false' }};
+  // Capability signals from the server so the UI can describe the actual
+  // backend that will fire instead of advertising a model the user can't
+  // reach. fal_ok=FAL_KEY present; comfy_local_ok=home GPU tunnel URL set.
+  const FAL_OK = {{ 'true' if fal_ok else 'false' }};
+  const COMFY_LOCAL_OK = {{ 'true' if comfy_local_ok else 'false' }};
   // Live in-viewer motion (real Wan 2.2 clips, not Ken Burns) is admin-only —
   // it spends Justen's home-GPU electricity and serializes through one card.
   // Paying users keep getting static images here; their motion ships in exports.
   const CAN_LIVE_MOTION = {{ 'true' if is_admin else 'false' }};
+  // Animation backend label — what the user actually gets when they hit ANIMATE.
+  // Admin+tunnel  -> Local GPU (Wan 2.2 5B); FAL_KEY present -> cloud Wan 2.5;
+  // otherwise the toggle still works but only produces Ken-Burns static motion.
+  const ANIM_BACKEND_LABEL = ({{ 'true' if is_admin else 'false' }} && COMFY_LOCAL_OK)
+    ? 'Local GPU (Wan 2.2 5B)'
+    : (FAL_OK ? 'Wan 2.5' : 'Static motion');
+  const ANIM_BACKEND_OFF_LABEL = ({{ 'true' if is_admin else 'false' }} && COMFY_LOCAL_OK)
+    ? 'Local GPU · ready'
+    : (FAL_OK ? 'Wan 2.5 · ready' : 'No backend · static panels only');
   // Per-scene-index state for the live-motion pipeline. Avoids re-POSTing
   // /scene-video/start on every loadScene call when the user navigates back.
   // Shape: { [sceneIdx]: { key, status, url, pollTimer, generation } }
@@ -982,6 +996,14 @@
       // picker is non-critical; theme just stays on default values
       applyTheme('solo_leveling');
     }
+  })();
+
+  // Paint the ANIMATE button's status label with the real backend on load
+  // so first-time visitors see what they'll actually get (instead of the
+  // placeholder "— · ready" that ships in the markup).
+  (function paintAnimLabel(){
+    const el = document.getElementById('eq-animate-fps');
+    if (el) el.textContent = ANIM_BACKEND_OFF_LABEL;
   })();
 
   // Touch swipe on viewport
@@ -1635,7 +1657,9 @@
     btn.classList.toggle('active', exportAnimate);
     btn.style.borderColor = exportAnimate ? '#ff6699' : '';
     btn.style.background  = exportAnimate ? 'rgba(255,60,120,.14)' : '';
-    document.getElementById('eq-animate-fps').textContent = exportAnimate ? 'Wan 2.5 · ON ✓' : 'Wan 2.5 · requires key';
+    document.getElementById('eq-animate-fps').textContent = exportAnimate
+      ? `${ANIM_BACKEND_LABEL} · ON ✓`
+      : ANIM_BACKEND_OFF_LABEL;
     updateTimeEst();
   }
 
@@ -1669,7 +1693,7 @@
   async function confirmExport(){
     document.getElementById('exp-stage-preview').style.display='none';
     document.getElementById('exp-stage-render').style.display='';
-    document.getElementById('exp-quality-label').textContent=exportQuality.toUpperCase()+(exportAnimate?' · WAN 2.5 ANIMATED':' · 60FPS');
+    document.getElementById('exp-quality-label').textContent=exportQuality.toUpperCase()+(exportAnimate?` · ${ANIM_BACKEND_LABEL.toUpperCase()}`:' · 60FPS');
     document.getElementById('exp-msg').textContent='Starting export...';
     document.getElementById('exp-bar').style.width='0%';
     document.getElementById('exp-pct').textContent='0%';
