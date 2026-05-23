@@ -812,7 +812,7 @@
         </button>
         <button class="eq-btn" id="eq-animate-btn" data-animate="0" onclick="toggleAnimate(this)">
           <span class="eq-icon">🎌</span><span class="eq-name">ANIMATE</span>
-          <span class="eq-fps" id="eq-animate-fps">Pika 2.0 · requires key</span>
+          <span class="eq-fps" id="eq-animate-fps">Wan 2.5 · requires key</span>
         </button>
       </div>
       <div class="exp-info-row">
@@ -1635,7 +1635,7 @@
     btn.classList.toggle('active', exportAnimate);
     btn.style.borderColor = exportAnimate ? '#ff6699' : '';
     btn.style.background  = exportAnimate ? 'rgba(255,60,120,.14)' : '';
-    document.getElementById('eq-animate-fps').textContent = exportAnimate ? 'Pika 2.0 · ON ✓' : 'Pika 2.0 · requires key';
+    document.getElementById('eq-animate-fps').textContent = exportAnimate ? 'Wan 2.5 · ON ✓' : 'Wan 2.5 · requires key';
     updateTimeEst();
   }
 
@@ -1669,7 +1669,7 @@
   async function confirmExport(){
     document.getElementById('exp-stage-preview').style.display='none';
     document.getElementById('exp-stage-render').style.display='';
-    document.getElementById('exp-quality-label').textContent=exportQuality.toUpperCase()+(exportAnimate?' · PIKA 2.0 ANIMATED':' · 60FPS');
+    document.getElementById('exp-quality-label').textContent=exportQuality.toUpperCase()+(exportAnimate?' · WAN 2.5 ANIMATED':' · 60FPS');
     document.getElementById('exp-msg').textContent='Starting export...';
     document.getElementById('exp-bar').style.width='0%';
     document.getElementById('exp-pct').textContent='0%';
