@@ -1346,6 +1346,171 @@ def _comfy_image(prompt: str, w: int, h: int, seed: int) -> bytes | None:
         return None
 
 
+def _comfy_workflow_photoreal(prompt: str, neg: str, w: int, h: int, seed: int) -> dict:
+    """ComfyUI workflow for CyberRealistic Pony with Hi-Res Fix + FaceDetailer.
+
+    This is the photoreal pipeline built 2026-05-22, tightened 2026-05-23 after
+    Justen said the artwork was "sub par". Used when style_key=="photoreal".
+    Four stages:
+      1. Base render @ w×h with dpmpp_3m_sde karras, 40 steps, CFG 6.5
+      2. Hi-Res Fix: 4x_NMKD-Siax_200k → downscale to 1.5x → 25-step refine @ denoise 0.5
+      3. FaceDetailer: YOLOv8m → per-face inpaint @ 640 guide, 28 steps, denoise 0.55
+      4. HandDetailer: YOLOv8s → per-hand inpaint @ 384 guide (broken hands kill realism)
+
+    Requires custom_nodes: ComfyUI-Impact-Pack + ComfyUI-Impact-Subpack.
+    Requires models:
+      - CyberRealisticPony.safetensors
+      - 4x_NMKD-Siax_200k.pth (better for skin/realism than 4x-UltraSharp)
+      - ultralytics/bbox/face_yolov8m.pt
+      - ultralytics/bbox/hand_yolov8s.pt
+    Per-image time: ~50 sec on RTX 4070 Ti SUPER (was 30 sec before tightening).
+    """
+    target_w = int(w * 1.5)
+    target_h = int(h * 1.5)
+    return {
+        "1": {"class_type": "CheckpointLoaderSimple",
+              "inputs": {"ckpt_name": "CyberRealisticPony.safetensors"}},
+        "2": {"class_type": "CLIPTextEncode",
+              "inputs": {"clip": ["1", 1], "text": prompt}},
+        "3": {"class_type": "CLIPTextEncode",
+              "inputs": {"clip": ["1", 1], "text": neg}},
+        "4": {"class_type": "EmptyLatentImage",
+              "inputs": {"width": w, "height": h, "batch_size": 1}},
+        "5": {"class_type": "KSampler",
+              "inputs": {"model": ["1", 0], "positive": ["2", 0],
+                         "negative": ["3", 0], "latent_image": ["4", 0],
+                         "seed": int(seed), "steps": 40, "cfg": 6.5,
+                         "sampler_name": "dpmpp_3m_sde", "scheduler": "karras",
+                         "denoise": 1.0}},
+        "6": {"class_type": "VAEDecode",
+              "inputs": {"samples": ["5", 0], "vae": ["1", 2]}},
+        # Hi-Res Fix stage
+        "20": {"class_type": "UpscaleModelLoader",
+               "inputs": {"model_name": "4x_NMKD-Siax_200k.pth"}},
+        "21": {"class_type": "ImageUpscaleWithModel",
+               "inputs": {"upscale_model": ["20", 0], "image": ["6", 0]}},
+        "22": {"class_type": "ImageScale",
+               "inputs": {"image": ["21", 0], "upscale_method": "lanczos",
+                          "width": target_w, "height": target_h, "crop": "disabled"}},
+        "23": {"class_type": "VAEEncode",
+               "inputs": {"pixels": ["22", 0], "vae": ["1", 2]}},
+        "24": {"class_type": "KSampler",
+               "inputs": {"model": ["1", 0], "positive": ["2", 0],
+                          "negative": ["3", 0], "latent_image": ["23", 0],
+                          "seed": int(seed) + 7777, "steps": 25, "cfg": 6.5,
+                          "sampler_name": "dpmpp_3m_sde", "scheduler": "karras",
+                          "denoise": 0.5}},
+        "25": {"class_type": "VAEDecode",
+               "inputs": {"samples": ["24", 0], "vae": ["1", 2]}},
+        # FaceDetailer stage
+        "30": {"class_type": "UltralyticsDetectorProvider",
+               "inputs": {"model_name": "bbox/face_yolov8m.pt"}},
+        "32": {"class_type": "FaceDetailer",
+               "inputs": {
+                   "image": ["25", 0], "model": ["1", 0], "clip": ["1", 1],
+                   "vae": ["1", 2], "positive": ["2", 0], "negative": ["3", 0],
+                   "bbox_detector": ["30", 0],
+                   "guide_size": 640, "guide_size_for": True, "max_size": 1024,
+                   "seed": int(seed) + 11111, "steps": 28, "cfg": 6.5,
+                   "sampler_name": "dpmpp_3m_sde", "scheduler": "karras",
+                   "denoise": 0.55, "feather": 5, "noise_mask": True,
+                   "force_inpaint": True, "bbox_threshold": 0.5,
+                   "bbox_dilation": 10, "bbox_crop_factor": 3.0,
+                   "sam_detection_hint": "center-1", "sam_dilation": 0,
+                   "sam_threshold": 0.93, "sam_bbox_expansion": 0,
+                   "sam_mask_hint_threshold": 0.7,
+                   "sam_mask_hint_use_negative": "False",
+                   "drop_size": 10, "wildcard": "", "cycle": 1,
+               }},
+        # HandDetailer stage — broken hands are the OTHER big quality killer
+        "33": {"class_type": "UltralyticsDetectorProvider",
+               "inputs": {"model_name": "bbox/hand_yolov8s.pt"}},
+        "34": {"class_type": "FaceDetailer",  # node reused for hand bbox inpaint
+               "inputs": {
+                   "image": ["32", 0], "model": ["1", 0], "clip": ["1", 1],
+                   "vae": ["1", 2], "positive": ["2", 0], "negative": ["3", 0],
+                   "bbox_detector": ["33", 0],
+                   "guide_size": 384, "guide_size_for": True, "max_size": 768,
+                   "seed": int(seed) + 22222, "steps": 24, "cfg": 6.5,
+                   "sampler_name": "dpmpp_3m_sde", "scheduler": "karras",
+                   "denoise": 0.5, "feather": 5, "noise_mask": True,
+                   "force_inpaint": True, "bbox_threshold": 0.5,
+                   "bbox_dilation": 10, "bbox_crop_factor": 3.0,
+                   "sam_detection_hint": "center-1", "sam_dilation": 0,
+                   "sam_threshold": 0.93, "sam_bbox_expansion": 0,
+                   "sam_mask_hint_threshold": 0.7,
+                   "sam_mask_hint_use_negative": "False",
+                   "drop_size": 10, "wildcard": "", "cycle": 1,
+               }},
+        "7": {"class_type": "SaveImage",
+              "inputs": {"images": ["34", 0],
+                         "filename_prefix": "animeforge_photoreal"}},
+    }
+
+
+def _comfy_image_photoreal(prompt: str, w: int, h: int, seed: int) -> bytes | None:
+    """Generate a PHOTOREAL scene via local ComfyUI (CyberRealistic Pony).
+
+    Returns PNG bytes on success, None on failure. The 3-stage pipeline takes
+    ~30 sec on the 4070 Ti SUPER. Caller should provide longer timeout than the
+    anime path (which is single-pass ~10 sec).
+    """
+    if not COMFY_LOCAL_URL or _comfy_locked():
+        return None
+    # Photoreal-specific negative — Pony score tags + anti-anime
+    neg = (
+        "score_4, score_3, score_2, score_1, "
+        "bad quality, worst quality, low quality, blurry, jpeg artifacts, "
+        "watermark, signature, text, logo, ugly face, deformed face, "
+        "deformed hands, malformed hands, fused fingers, extra fingers, "
+        "extra limbs, multiple heads, mutated, "
+        "cartoon, anime, 2d, sketch, painting, illustration, drawing, "
+        "doll face, mannequin, plastic skin, oversaturated, washed out, "
+        "asymmetric eyes, cross-eyed, child, underage, teen"
+    )
+    seed_val = int(seed) % 2147483647
+    w64 = max(512, (w // 64) * 64)
+    h64 = max(512, (h // 64) * 64)
+    base = COMFY_LOCAL_URL
+    headers = _comfy_headers()
+    try:
+        workflow = _comfy_workflow_photoreal(prompt, neg, w64, h64, seed_val)
+        sub = http.post(f"{base}/prompt",
+                        json={"prompt": workflow, "client_id": "animeforge-photoreal"},
+                        headers=headers, timeout=30)
+        sub.raise_for_status()
+        prompt_id = sub.json().get("prompt_id")
+        if not prompt_id:
+            _mark_comfy_locked("photoreal img: no prompt_id")
+            return None
+        # Photoreal is ~50 sec end-to-end (4-stage pipeline) — generous deadline
+        deadline = time.time() + 150
+        fname = subfolder = None
+        while time.time() < deadline:
+            time.sleep(3)
+            try:
+                h_resp = http.get(f"{base}/history/{prompt_id}", headers=headers, timeout=8)
+                hist = h_resp.json().get(prompt_id) or {}
+                out = hist.get("outputs") or {}
+                imgs = (out.get("7") or {}).get("images") or []
+                if imgs:
+                    fname = imgs[0].get("filename")
+                    subfolder = imgs[0].get("subfolder", "")
+                    break
+            except Exception:
+                continue
+        if not fname:
+            return None
+        r = http.get(f"{base}/view",
+                     params={"filename": fname, "subfolder": subfolder, "type": "output"},
+                     headers=headers, timeout=30)
+        r.raise_for_status()
+        return r.content
+    except Exception as exc:
+        _mark_comfy_locked(f"photoreal img: {str(exc)[:80]}")
+        return None
+
+
 @app.route("/scene-art")
 @login_required
 def scene_art():
@@ -1369,9 +1534,31 @@ def scene_art():
         return "missing prompt", 400
 
     tier = "admin" if session.get("is_admin") else session.get("tier", "free")
-    cache_key = (prompt, seed or 0, w, h)
+    style_key = (request.args.get("style") or "").strip()
+    cache_key = (prompt, seed or 0, w, h, style_key)
 
-    # Scene-art skips ComfyUI to keep the viewer fast and non-blocking.
+    # PHOTOREAL path (admin + local GPU). When the project's style_key is
+    # "photoreal", route the scene-art viewer to the CyberRealistic Pony
+    # workflow instead of the default anime stack. Takes ~30 sec (vs ~10
+    # sec for anime) so we only invoke it when style explicitly opts in.
+    if (style_key == "photoreal" and tier == "admin"
+            and COMFY_LOCAL_URL and not _comfy_locked()):
+        cached = _SCENE_ART_CACHE.get(cache_key)
+        if cached:
+            return Response(cached, mimetype="image/png",
+                            headers={"Cache-Control": "public, max-age=3600",
+                                     "X-Image-Source": "comfy-photoreal-cached"})
+        img_bytes = _comfy_image_photoreal(prompt, w, h, seed or 0)
+        if img_bytes:
+            if len(_SCENE_ART_CACHE) >= _SCENE_ART_CACHE_MAX:
+                _SCENE_ART_CACHE.clear()
+            _SCENE_ART_CACHE[cache_key] = img_bytes
+            return Response(img_bytes, mimetype="image/png",
+                            headers={"Cache-Control": "public, max-age=3600",
+                                     "X-Image-Source": "comfy-photoreal"})
+        # photoreal failed → fall through to fal.ai / Pollinations below
+
+    # Scene-art (anime path) skips ComfyUI to keep the viewer fast and non-blocking.
     # Animagine XL is used for export frame generation (do_export) where
     # we can afford to wait. For the viewer, Pollinations is instant and
     # the Wan animation clips overlay it anyway.
@@ -1964,7 +2151,95 @@ def _interpolate_to_48fps(src: str, dst: str) -> bool:
     return _interpolate_to_target_fps(src, dst, target_fps=TARGET_FPS)
 
 
-def animate_scene_comfy(img_path, prompt, tmp_dir, scene_idx, job, length: int = 49):
+def _comfy_workflow_cogvideox_i2v(image_filename: str, prompt: str, seed: int,
+                                   num_frames: int = 49, width: int = 720,
+                                   height: int = 480) -> dict:
+    """ComfyUI workflow for CogVideoX-5B-I2V GGUF Q4 via kijai's wrapper.
+
+    Higher-quality alternative to Wan 2.2 5B for image-to-video. Built 2026-05-23
+    after Justen called Wan output "ok" but not Noct.Co tier. Q4 quantization
+    drops VRAM use enough to stay fully on GPU on the 4070 Ti SUPER.
+
+    Per-clip time: ~8-12 min (vs ~100 sec for Wan). Quality tradeoff is worth
+    it for hero scenes; default to Wan for fast iteration.
+
+    Requires custom_nodes: ComfyUI-CogVideoXWrapper.
+    Requires models:
+      - CogVideo/CogVideoX_5b_I2V_GGUF_Q4_0.safetensors (3.4GB)
+      - text_encoders/t5/google_t5-v1_1-xxl_encoderonly-fp8_e4m3fn.safetensors (4.8GB)
+
+    Workflow output is at node id "11" (SaveVideo) so the existing
+    animate_scene_comfy poll logic works unchanged.
+    """
+    negative = ("The video is not of a high quality, it has a low resolution. "
+                "Watermark present in each frame. Strange motion trajectory. "
+                "Blurry, low quality, distorted, jpeg artifacts.")
+    return {
+        # GGUF loader outputs [model, vae]
+        "1": {"class_type": "DownloadAndLoadCogVideoGGUFModel",
+              "inputs": {
+                  "model": "CogVideoX_5b_I2V_GGUF_Q4_0.safetensors",
+                  "vae_precision": "bf16",
+                  "fp8_fastmode": False,
+                  "load_device": "main_device",
+                  "enable_sequential_cpu_offload": False,
+                  "attention_mode": "sdpa",
+              }},
+        # T5-XXL encoder
+        "2": {"class_type": "CLIPLoader",
+              "inputs": {"clip_name": r"t5\google_t5-v1_1-xxl_encoderonly-fp8_e4m3fn.safetensors",
+                         "type": "sd3"}},
+        "3": {"class_type": "CogVideoTextEncode",
+              "inputs": {"clip": ["2", 0], "prompt": prompt,
+                         "strength": 1.0, "force_offload": True}},
+        "4": {"class_type": "CogVideoTextEncode",
+              "inputs": {"clip": ["2", 0], "prompt": negative,
+                         "strength": 1.0, "force_offload": True}},
+        "5": {"class_type": "LoadImage",
+              "inputs": {"image": image_filename}},
+        "6": {"class_type": "ImageScale",
+              "inputs": {"image": ["5", 0], "upscale_method": "lanczos",
+                         "width": width, "height": height, "crop": "disabled"}},
+        # I2V image conditioning latent (vae from loader output 1)
+        "7": {"class_type": "CogVideoImageEncode",
+              "inputs": {"vae": ["1", 1], "start_image": ["6", 0],
+                         "enable_tiling": False}},
+        # Sampler — image_cond_latents required for I2V
+        "8": {"class_type": "CogVideoSampler",
+              "inputs": {
+                  "model": ["1", 0],
+                  "positive": ["3", 0],
+                  "negative": ["4", 0],
+                  "image_cond_latents": ["7", 0],
+                  "num_frames": num_frames,
+                  "steps": 25,
+                  "cfg": 6.0,
+                  "seed": int(seed),
+                  "scheduler": "CogVideoXDDIM",
+                  "denoise_strength": 1.0,
+              }},
+        # Decode latent — vae from loader output 1
+        "9": {"class_type": "CogVideoDecode",
+              "inputs": {"vae": ["1", 1], "samples": ["8", 0],
+                         "enable_vae_tiling": True,
+                         "tile_sample_min_height": 240,
+                         "tile_sample_min_width": 360,
+                         "tile_overlap_factor_height": 0.2,
+                         "tile_overlap_factor_width": 0.2,
+                         "auto_tile_size": True}},
+        "10": {"class_type": "CreateVideo",
+               "inputs": {"images": ["9", 0], "fps": 8.0}},
+        # SaveVideo — id "11" matches the Wan workflow so the polling loop
+        # in animate_scene_comfy doesn't need to change.
+        "11": {"class_type": "SaveVideo",
+               "inputs": {"video": ["10", 0],
+                          "filename_prefix": "animeforge/cogvideo",
+                          "format": "mp4", "codec": "h264"}},
+    }
+
+
+def animate_scene_comfy(img_path, prompt, tmp_dir, scene_idx, job, length: int = 49,
+                        backend: str = "wan"):
     """Animate a scene using the local ComfyUI tunnel (admin tier path).
 
     Returns the MP4 path on success, None on failure (circuit breaker trips
@@ -1996,8 +2271,15 @@ def animate_scene_comfy(img_path, prompt, tmp_dir, scene_idx, job, length: int =
 
         # Submit the workflow. ComfyUI returns a prompt_id we then poll for.
         seed = abs(hash((img_path, scene_idx))) % 100000
-        workflow = _comfy_workflow_wan22_i2v(uploaded_name, prompt, seed, length=length)
-        job["message"] = f"Scene {scene_idx+1} — generating on local GPU…"
+        if backend == "cogvideox":
+            # CogVideoX-5B-I2V GGUF Q4 — slower (~8-12 min/clip) but higher
+            # quality than Wan 2.2 5B. Justen opt-in for hero scenes.
+            workflow = _comfy_workflow_cogvideox_i2v(uploaded_name, prompt, seed,
+                                                     num_frames=length)
+            job["message"] = f"Scene {scene_idx+1} — generating with CogVideoX on local GPU…"
+        else:
+            workflow = _comfy_workflow_wan22_i2v(uploaded_name, prompt, seed, length=length)
+            job["message"] = f"Scene {scene_idx+1} — generating on local GPU…"
         sub = http.post(f"{base}/prompt",
                         json={"prompt": workflow, "client_id": "animeforge"},
                         headers=headers, timeout=30)
@@ -2008,9 +2290,9 @@ def animate_scene_comfy(img_path, prompt, tmp_dir, scene_idx, job, length: int =
             return None
 
         # Poll history. Wan 2.2 5B takes ~3-5 min on a 4070 Ti SUPER for 5 sec
-        # of 720p video, so generous timeout. Caller's animate_scene loop is
-        # already serialized so we won't queue-bomb the GPU.
-        deadline = time.time() + 600  # 10 min hard ceiling per scene
+        # of 720p video; CogVideoX GGUF Q4 takes ~8-12 min for similar length.
+        # Caller's animate_scene loop is serialized so we won't queue-bomb the GPU.
+        deadline = time.time() + (1200 if backend == "cogvideox" else 600)
         result_filename = None
         result_subfolder = ""
         while time.time() < deadline:
@@ -2032,7 +2314,7 @@ def animate_scene_comfy(img_path, prompt, tmp_dir, scene_idx, job, length: int =
                 continue
 
         if not result_filename:
-            _mark_comfy_locked("generation timed out after 10 min")
+            _mark_comfy_locked(f"generation timed out ({backend})")
             return None
 
         # Fetch the rendered MP4 from ComfyUI's /view endpoint.
@@ -2107,7 +2389,17 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
             seed = run_seed + i * 17 + 3
 
             img_bytes = None
-            if FAL_KEY:
+            # PHOTOREAL path (admin + comfy_local): CyberRealistic Pony with
+            # HiRes + FaceDetailer. Justen called this output "great" 2026-05-22.
+            # Only kicks in when style_key=="photoreal" — the Pony score tags
+            # in the photoreal style suffix would muddy any other style pack.
+            if (style_key == "photoreal"
+                    and COMFY_LOCAL_URL and not _comfy_locked()):
+                job["message"] = f"Scene {i+1}/{n} — generating photoreal art on local GPU…"
+                img_bytes = _comfy_image_photoreal(raw_prompt, W, H, seed)
+                if img_bytes:
+                    job["message"] = f"Scene {i+1}/{n} — photoreal art ready ✓"
+            if not img_bytes and FAL_KEY:
                 img_bytes = _fal_image(raw_prompt, W, H, model="hunyuan", seed=seed)
                 if img_bytes:
                     job["message"] = f"Scene {i+1}/{n} — Hunyuan art ready ✓"
@@ -2161,10 +2453,13 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
                 # it's slow on Render shared CPU. Each path falls through to the next
                 # only when the previous one is unavailable / circuit-broken / explicitly
                 # not chosen — we never silently swap a paid model for a free one mid-run.
-                if anim_model == "comfy_local" and COMFY_LOCAL_URL and not _comfy_locked():
-                    vid_path = animate_scene_comfy(img_path, raw_prompt, tmp, i, job)
+                if anim_model in ("comfy_local", "comfy_cogvideox") and COMFY_LOCAL_URL and not _comfy_locked():
+                    backend = "cogvideox" if anim_model == "comfy_cogvideox" else "wan"
+                    vid_path = animate_scene_comfy(img_path, raw_prompt, tmp, i, job,
+                                                   backend=backend)
+                    label = "CogVideoX" if backend == "cogvideox" else "Wan"
                     if vid_path:
-                        job["message"] = f"Scene {i+1}/{n} — local GPU animation done ✓"
+                        job["message"] = f"Scene {i+1}/{n} — {label} local GPU animation done ✓"
                     elif FAL_KEY and not _fal_locked():
                         # Justen's PC offline / tunnel dropped → fall through to fal.ai
                         # so an in-flight admin export doesn't die when the home GPU
@@ -2199,7 +2494,7 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
                 # already 30fps. Interpolating zoompan would be wasted work, so
                 # only smooth the real-motion paths. Silent fallback to the raw
                 # clip on any failure so a single bad scene can't tank the export.
-                if vid_path and anim_model in ("wan", "kling", "comfy_local"):
+                if vid_path and anim_model in ("wan", "kling", "comfy_local", "comfy_cogvideox"):
                     smooth_path = os.path.join(tmp, f"smooth_{i:03d}.mp4")
                     job["message"] = f"Scene {i+1}/{n} — smoothing to {TARGET_FPS}fps…"
                     if _interpolate_to_target_fps(vid_path, smooth_path):
@@ -2356,11 +2651,14 @@ def start_export():
     # 5B model produces visibly stiff motion compared to fal.ai's hosted Wan 2.5
     # and admin should see the same fluent output everyone else sees.
     anim_model = (data.get("anim_model") or "").strip()
-    if anim_model not in ("local", "wan", "kling", "comfy_local"):
+    # comfy_cogvideox added 2026-05-23: same routing as comfy_local but uses
+    # CogVideoX-5B-I2V GGUF Q4 instead of Wan 2.2 5B. Slower (~8-12 min/clip)
+    # but higher quality. Admin-only since it ties up the local GPU longer.
+    if anim_model not in ("local", "wan", "kling", "comfy_local", "comfy_cogvideox"):
         anim_model = ""  # empty → tier default below
-    # Only admin can request comfy_local — it's his GPU; paying users get
-    # consistent latency by going through fal.ai's hosted SLA.
-    if anim_model == "comfy_local" and tier != "admin":
+    # Only admin can request the local-GPU paths — it's his hardware; paying users
+    # get consistent latency by going through fal.ai's hosted SLA.
+    if anim_model in ("comfy_local", "comfy_cogvideox") and tier != "admin":
         anim_model = "wan"
     if not anim_model:
         # Admin always prefers the home GPU when its tunnel URL is set —
@@ -2381,14 +2679,16 @@ def start_export():
         anim_model = "local"   # no key → free fallback
     # Admin override: if the frontend defaulted to "wan"/"kling" but the home
     # GPU tunnel is up, route to local instead — admin shouldn't burn fal.ai
-    # credits when free local hardware is available.
+    # credits when free local hardware is available. Defaults to Wan
+    # (comfy_local) not CogVideoX since Wan is 5× faster — admin opts into
+    # CogVideoX explicitly when they want hero-scene quality.
     if tier == "admin" and COMFY_LOCAL_URL and anim_model in ("wan", "kling"):
         anim_model = "comfy_local"
     if quality == "4k" and tier not in ("monarch", "admin"):
         quality = "1080p"
-    if animate and not FAL_KEY and anim_model not in ("local", "comfy_local"):
+    if animate and not FAL_KEY and anim_model not in ("local", "comfy_local", "comfy_cogvideox"):
         # Animate requested with paid model but no FAL key — degrade gracefully.
-        # comfy_local is exempt because it uses Justen's GPU, not fal.ai.
+        # Local-GPU paths are exempt because they use Justen's GPU, not fal.ai.
         anim_model = "local"
     if not story or not story.get("scenes"):
         return jsonify({"error": "No story provided"}), 400

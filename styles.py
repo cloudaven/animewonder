@@ -124,6 +124,23 @@ STYLES = {
             "blood is a design element. Romantic gothic intensity. Long brooding monologues offset by sharp gallows humor."
         ),
     },
+    "photoreal": {
+        "name": "Photoreal Cinematic",
+        "badge": "PR",
+        "image_suffix": (
+            "score_9, score_8_up, score_7_up, source_realistic, "
+            "photorealistic, hyperrealistic, ultra detailed, 8k, sharp focus, "
+            "cinematic lighting, dramatic depth of field, film grain, "
+            "professional photography, raw photo, cinematic key art, "
+            "masterpiece, best quality"
+        ),
+        "vibe_hint": (
+            "Photorealistic cinematic. Real-looking characters, mech-armored women, "
+            "cyborgs, dark-fantasy warriors, sci-fi soldiers. Halo / Blade Runner / "
+            "Frank Frazetta painterly photoreal vibe. Gritty texture detail. "
+            "Strong chiaroscuro lighting. No anime tropes — speaks like a live-action film."
+        ),
+    },
 }
 
 DEFAULT_STYLE = "solo_leveling"
