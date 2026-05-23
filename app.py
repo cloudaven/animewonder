@@ -2585,6 +2585,10 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
 
         # FFmpeg concat-demuxer: takes a list file of MP4 paths, stream-copies
         # them into one output. No re-decode, no frame buffers, near-zero RAM.
+        # Resolve the ffmpeg binary the same way the rest of the app does —
+        # bare "ffmpeg" raises FileNotFoundError on any host where it isn't on
+        # PATH (e.g. local Windows dev, where ffmpeg lives inside imageio_ffmpeg).
+        ffmpeg = _get_ffmpeg()
         concat_list = os.path.join(tmp, "concat.txt")
         with open(concat_list, "w") as fh:
             for p in clips:
@@ -2592,7 +2596,7 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
                 fh.write(f"file '{p.replace(chr(39), chr(39)+chr(92)+chr(39)+chr(39))}'\n")
         try:
             res = subprocess.run(
-                ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                [ffmpeg, "-y", "-f", "concat", "-safe", "0",
                  "-i", concat_list, "-c", "copy", "-movflags", "+faststart",
                  out_path],
                 capture_output=True, timeout=600,
@@ -2601,7 +2605,7 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
                 # Stream-copy can fail if per-scene encoders drifted on params;
                 # fall back to a full re-encode pass (slower but always works).
                 subprocess.run(
-                    ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                    [ffmpeg, "-y", "-f", "concat", "-safe", "0",
                      "-i", concat_list,
                      "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
                      "-c:a", "aac", "-movflags", "+faststart",
