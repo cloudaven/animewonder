@@ -2422,7 +2422,16 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
             if name and anchor:
                 characters_by_name[name] = anchor
 
-        W, H = (3840, 2160) if quality == "4k" else (1920, 1080)
+        # Target output dims. The 4K branch is what the user pays for.
+        OUT_W, OUT_H = (3840, 2160) if quality == "4k" else (1920, 1080)
+        # Per-scene RENDER dims are always capped at 1080p — Render's 512MB
+        # free-tier worker can't survive a 4K per-scene ffmpeg encode (libx264
+        # ultrafast at 3840×2160 with even one reference frame in RAM pushes
+        # gunicorn+Python+PIL past the cap and gets SIGKILLed mid-scene).
+        # We do the 4K upscale ONCE at the final concat-filter pass, where
+        # ffmpeg streams frames without numpy roundtrips. That single pass
+        # uses ~150MB of bounded RAM regardless of output resolution.
+        W, H = 1920, 1080
         job["scenes_total"] = n
         # Use a stable per-export seed so re-runs of the same story produce the same characters
         run_seed = abs(hash((story.get("title",""), style_key))) % 100000
@@ -2742,24 +2751,41 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
                 # ffmpeg concat requires escaped single quotes for safety
                 fh.write(f"file '{p.replace(chr(39), chr(39)+chr(92)+chr(39)+chr(39))}'\n")
         try:
-            res = subprocess.run(
-                [ffmpeg, "-y", "-f", "concat", "-safe", "0",
-                 "-i", concat_list, "-c", "copy", "-movflags", "+faststart",
-                 out_path],
-                capture_output=True, timeout=600,
-            )
+            # When OUT_W != per-scene W (i.e. quality=="4k"), the cheap
+            # stream-copy path can't work — scenes are 1920×1080 and we need
+            # to upscale to 3840×2160. Skip straight to the filter_complex
+            # pass which streams + scales in one shot without per-scene
+            # re-encodes piling up RAM.
+            if (OUT_W, OUT_H) == (W, H):
+                res = subprocess.run(
+                    [ffmpeg, "-y", "-f", "concat", "-safe", "0",
+                     "-i", concat_list, "-c", "copy", "-movflags", "+faststart",
+                     out_path],
+                    capture_output=True, timeout=600,
+                )
+            else:
+                # Sentinel non-zero so the upscale path runs below.
+                class _Res: returncode = 1; stderr = b"skipped: upscale required"
+                res = _Res()
             if res.returncode != 0:
                 # Stream-copy fell over (usually mismatched stream params
-                # across scenes). Try a same-demuxer re-encode first because
-                # it's the cheapest path that still works for matching layouts.
-                res2 = subprocess.run(
-                    [ffmpeg, "-y", "-f", "concat", "-safe", "0",
-                     "-i", concat_list,
-                     "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
-                     "-c:a", "aac", "-movflags", "+faststart",
-                     out_path],
-                    capture_output=True, timeout=900,
-                )
+                # across scenes, OR we deliberately skipped it to do a 4K
+                # upscale). Try a same-demuxer re-encode first because it's
+                # the cheapest path that still works for matching layouts —
+                # but only if no upscale is required (concat demuxer can't
+                # change resolution mid-stream).
+                if (OUT_W, OUT_H) == (W, H):
+                    res2 = subprocess.run(
+                        [ffmpeg, "-y", "-f", "concat", "-safe", "0",
+                         "-i", concat_list,
+                         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
+                         "-c:a", "aac", "-movflags", "+faststart",
+                         out_path],
+                        capture_output=True, timeout=900,
+                    )
+                else:
+                    class _R: returncode = 1; stderr = b"upscale required"
+                    res2 = _R()
                 if res2.returncode != 0:
                     # Real "always works" path: concat FILTER (not demuxer)
                     # with per-input scale + sar + format + resample so any
@@ -2806,8 +2832,8 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
                     parts: list[str] = []
                     for idx in range(len(clips)):
                         parts.append(
-                            f"[{idx}:v:0]scale={W}:{H}:force_original_aspect_ratio=decrease,"
-                            f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p,"
+                            f"[{idx}:v:0]scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease,"
+                            f"pad={OUT_W}:{OUT_H}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p,"
                             f"fps={TARGET_FPS}[v{idx}];"
                         )
                         if has_audio_per_clip[idx]:
