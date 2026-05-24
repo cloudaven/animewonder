@@ -2572,12 +2572,37 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
             tts_parts  = [f"{sc.get('title','')}. {sc.get('action','')}"]
             for line in sc.get("dialogue", []):
                 tts_parts.append(f"{line.get('speaker','')}: {line.get('line','')}")
+            audio = None
+            duration = min_dur
             try:
                 gTTS(" ".join(tts_parts), lang="en").save(audio_path)
-                audio    = AudioFileClip(audio_path)
-                duration = max(audio.duration + 3, min_dur)
+                # Read duration via a lightweight ffmpeg probe instead of
+                # loading the full AudioFileClip. Loading the clip held the
+                # decoded mp3 in MoviePy's internal buffer for the rest of
+                # the scene's processing — a ~5MB-per-scene RAM hit that
+                # compounded with the ffmpeg subprocess on Render's 512MB
+                # free worker. We only need the duration; the file path
+                # gets passed to ffmpeg directly below.
+                try:
+                    ff_probe = subprocess.run(
+                        [_get_ffmpeg(), "-i", audio_path],
+                        capture_output=True, timeout=10)
+                    txt = (ff_probe.stderr or b"").decode("utf-8", "replace")
+                    m = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", txt)
+                    if m:
+                        audio_dur = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+                    else:
+                        audio_dur = min_dur
+                except Exception:
+                    audio_dur = min_dur
+                duration = max(audio_dur + 3, min_dur)
+                # For the MoviePy video-scene path below we still need an
+                # AudioFileClip object so we can attach + fade audio. For
+                # the static (ffmpeg-direct) path we just need the path.
+                if vid_path:
+                    audio = AudioFileClip(audio_path)
             except Exception:
-                audio = None; duration = min_dur
+                pass
 
             # ── Build clip + write per-scene MP4 immediately ──
             # MEMORY: Render's free tier worker is 512MB. Holding 5+ MoviePy
@@ -2663,9 +2688,21 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
                 #   shortest+anullsrc OR audio.mp3 : audio is always present
                 vf = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
                       f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p")
-                cmd = [ffmpeg_bin, "-y", "-loglevel", "error",
+                # Wrap ffmpeg with `nice` when available so gunicorn can
+                # still serve health checks under CPU pressure. On Render
+                # free tier we have ~0.1 vCPU shared — if ffmpeg saturates
+                # it the external health-check probe to /login times out
+                # and Render kills the worker mid-export. nice doesn't help
+                # cgroup throttling, but it does help when the kernel is
+                # picking which runnable thread to schedule next on a
+                # shared vCPU.
+                nice_bin = shutil.which("nice")
+                ff_prefix = [nice_bin, "-n", "19"] if nice_bin else []
+                cmd = [*ff_prefix, ffmpeg_bin, "-y", "-loglevel", "error",
+                       "-threads", "1",  # single-thread so we don't pile
+                                          # work onto the shared vCPU
                        "-loop", "1", "-i", img_path]
-                if audio and os.path.exists(audio_path):
+                if os.path.exists(audio_path) and os.path.getsize(audio_path) > 0:
                     cmd.extend(["-i", audio_path])
                 else:
                     # Silent stereo source — duration controlled by -t below.
@@ -2684,9 +2721,28 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
                     "-shortest", "-movflags", "+faststart",
                     scene_out,
                 ])
+                # Spawn via Popen + poll loop instead of subprocess.run so
+                # we can periodically update the job heartbeat. The poll
+                # interval also yields the GIL so gunicorn's other threads
+                # get scheduled and can answer health checks while ffmpeg
+                # is encoding.
                 try:
-                    res = subprocess.run(cmd, capture_output=True, timeout=600)
-                    if res.returncode != 0:
+                    import gc as _gc
+                    _gc.collect()
+                    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                            stderr=subprocess.PIPE)
+                    heartbeat_deadline = time.time() + 600
+                    while proc.poll() is None:
+                        if time.time() > heartbeat_deadline:
+                            proc.kill()
+                            break
+                        # Refresh job state every iteration so the polling
+                        # client sees we're still alive even during the
+                        # long single-scene encode.
+                        job["elapsed_seconds"] = int(time.time() - job["start_time"])
+                        time.sleep(1.5)
+                    rc = proc.returncode if proc.returncode is not None else -1
+                    if rc != 0:
                         # ffmpeg path failed — fall back to MoviePy (legacy
                         # path). May OOM at 4K but at least we tried.
                         clip = ImageClip(img_path, duration=duration)
@@ -2703,7 +2759,7 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
                             logger=None)
                         try: clip.close()
                         except Exception: pass
-                except subprocess.TimeoutExpired:
+                except Exception:
                     pass
 
             if audio:
