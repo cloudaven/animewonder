@@ -2760,13 +2760,27 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
                 job["message"] = f"Upscaling scene {idx+1}/{len(clips)} to {OUT_W}×{OUT_H}…"
                 vf = (f"scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease,"
                       f"pad={OUT_W}:{OUT_H}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p")
+                # Aggressive minimum-RAM x264 config — needed because the
+                # Render 512MB free worker dies on default ultrafast 4K
+                # encoder state (~250MB encoder RAM at 3840×2160). This
+                # config disables every memory-hungry feature: no B-frames,
+                # no lookahead, no CABAC, 1 ref frame, single thread.
+                # Quality is acceptable for upscaled-from-1080p content
+                # since we're not adding real detail anyway.
+                x264_min = (
+                    "no-cabac=1:no-deblock=1:partitions=none:me=dia:"
+                    "subme=1:ref=1:bframes=0:scenecut=0:rc-lookahead=0:"
+                    "keyint=60:min-keyint=60:trellis=0:no-mixed-refs=1:"
+                    "no-weightb=1:weightp=0:8x8dct=0:sliced-threads=0"
+                )
                 up_res = subprocess.run(
                     [ffmpeg, "-y", "-loglevel", "error", "-i", p,
                      "-vf", vf, "-r", str(TARGET_FPS),
-                     "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
+                     "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26",
+                     "-x264-params", x264_min, "-threads", "1",
                      "-c:a", "copy",
                      up_out],
-                    capture_output=True, timeout=600,
+                    capture_output=True, timeout=900,
                 )
                 if up_res.returncode != 0:
                     # If upscale fails on a single scene, fall through to the
@@ -2966,6 +2980,17 @@ def start_export():
     if tier == "admin" and COMFY_LOCAL_URL and anim_model in ("wan", "kling"):
         anim_model = "comfy_local"
     if quality == "4k" and tier not in ("monarch", "admin"):
+        quality = "1080p"
+    # Hard cap when the host can't deliver 4K. Render's 512MB free-tier
+    # worker is OOM-killed during any 4K libx264 encode no matter how
+    # aggressively we tune x264 (the encoder needs ~150MB at 3840×2160
+    # and Python+Flask+MoviePy already use ~300MB of the 512MB cap).
+    # Setting MAX_RENDER_QUALITY=1080p in the deploy env vars silently
+    # downgrades 4K to 1080p so users get a clean download instead of a
+    # cryptic "not_found" after the worker dies. Unset (or set to "4k")
+    # on Starter+ plans where the worker has enough RAM.
+    _max_quality = os.environ.get("MAX_RENDER_QUALITY", "").strip().lower()
+    if _max_quality == "1080p" and quality == "4k":
         quality = "1080p"
     if animate and not FAL_KEY and anim_model not in ("local", "comfy_local", "comfy_cogvideox"):
         # Animate requested with paid model but no FAL key — degrade gracefully.
