@@ -81,7 +81,18 @@ PACKS = {
     "monarch": {"credits": PACK_MONARCH_CREDITS, "price": PACK_MONARCH_PRICE, "tier": "monarch"},
 }
 
-FAL_KEY = os.environ.get("FAL_KEY", "")
+# fal.ai dropped 2026-05-24 — Justen's balance kept going to 0 and the
+# whole pipeline routinely returned "fal.ai balance exhausted" errors
+# every export. Local-GPU paths (Wan 2.2 5B, CogVideoX, LongCat-Video)
+# are free for admin and the default for paying tiers now. The FAL_KEY
+# env var on Render can be deleted — it's no longer read.
+
+# LongCat-Video local backend (Meituan, 13.6B). Same tunnel pattern as
+# COMFY_LOCAL_URL but points at a separate HTTP server on Justen's PC
+# that wraps the LongCat pipeline. Optional — when unset, animation
+# falls back to the existing Wan 2.2 5B / CogVideoX comfy paths.
+LONGCAT_LOCAL_URL   = (os.environ.get("LONGCAT_LOCAL_URL")   or "").rstrip("/")
+LONGCAT_LOCAL_TOKEN = (os.environ.get("LONGCAT_LOCAL_TOKEN") or "").strip()
 
 # Local ComfyUI bridge (Justen's RTX 4070 Ti SUPER exposed via cloudflared tunnel).
 # Opt-in only. Default routing is fal.ai Wan API for everyone because the local
@@ -176,66 +187,6 @@ def extract_json(text):
     return text[start:]
 
 
-def _fal_image(prompt, width, height, model="hunyuan", seed=None):
-    """
-    Generate a single anime-quality image via fal.ai. Returns JPEG bytes or None.
-
-    Why this exists: Pollinations.ai (free default) produces unreliable anime
-    faces — eyes drift off, mouth/nose distort, hair detail muddies. fal.ai's
-    Hunyuan 3.0 and ByteDance Seedream 4.5 are the 2026 SOTA for anime
-    character art. Admin and paid tiers route through here; free still uses
-    Pollinations (cost: $0).
-
-    Models:
-      - "hunyuan"  → fal-ai/hunyuan-image/v3/text-to-image  (best for anime / character art)
-      - "seedream" → fal-ai/bytedance/seedream/v4/text-to-image  (best general / cinematic)
-    Cost is roughly $0.04 per image at the time of writing.
-    """
-    if not FAL_KEY or _fal_locked():
-        return None
-    import fal_client
-
-    endpoint = (
-        "fal-ai/hunyuan-image/v3/text-to-image"
-        if model == "hunyuan"
-        else "fal-ai/bytedance/seedream/v4/text-to-image"
-    )
-
-    if width == height:
-        image_size = "square_hd"
-    elif width > height:
-        image_size = "landscape_16_9"
-    else:
-        image_size = "portrait_16_9"
-
-    args = {
-        "prompt": prompt[:1500],
-        "image_size": image_size,
-        "num_images": 1,
-        "enable_safety_checker": True,
-    }
-    if seed is not None:
-        args["seed"] = int(seed)
-
-    try:
-        result = fal_client.subscribe(endpoint, arguments=args, with_logs=False)
-        images = result.get("images") or []
-        if images:
-            url = images[0].get("url")
-            if url:
-                r = http.get(url, timeout=90)
-                if r.status_code == 200:
-                    return r.content
-    except Exception as exc:
-        msg = str(exc)
-        print(f"[fal-image] {model} failed: {msg}", flush=True)
-        # Trip the circuit breaker for known unrecoverable conditions so the
-        # rest of the export doesn't pay the API latency on every scene.
-        if "User is locked" in msg or "Exhausted balance" in msg:
-            _mark_fal_locked(f"image gen — {msg[:80]}")
-    return None
-
-
 def _pollinations_image(prompt: str, w: int, h: int, seed: int) -> bytes | None:
     """Fetch a single scene image from Pollinations.ai. Races turbo + flux
     in parallel and returns whichever responds first with valid bytes.
@@ -292,22 +243,7 @@ def _pollinations_image(prompt: str, w: int, h: int, seed: int) -> bytes | None:
 _SCENE_ART_CACHE: dict = {}
 _SCENE_ART_CACHE_MAX = 200
 
-# Fal.ai outage circuit-breaker. When we see "User is locked" (exhausted balance)
-# or repeated network errors, mark fal.ai unavailable for 10 minutes so subsequent
-# calls skip the failing path immediately rather than each one paying ~1 sec of
-# failed API latency. Resets automatically after the cooldown.
-_FAL_LOCKED_UNTIL: float = 0.0
-
-def _fal_locked() -> bool:
-    return time.time() < _FAL_LOCKED_UNTIL
-
-def _mark_fal_locked(reason: str = "") -> None:
-    global _FAL_LOCKED_UNTIL
-    _FAL_LOCKED_UNTIL = time.time() + 600
-    print(f"[fal] circuit open for 10 min — {reason}", flush=True)
-
-
-# Same pattern for the local ComfyUI tunnel. Justen's PC may be asleep, the
+# Circuit-breaker for the local ComfyUI tunnel. Justen's PC may be asleep, the
 # tunnel may have dropped, or the GPU may be busy with another job. When that
 # happens we don't want every export to wait the full HTTP timeout — we open
 # the circuit for 5 minutes (shorter than fal's 10 because home PCs come back
@@ -1163,8 +1099,9 @@ def index():
                            email=session.get("email",""),
                            tier=tier, used=used, limit=limit,
                            paypal_client_id=PAYPAL_CLIENT_ID,
-                           fal_ok=bool(FAL_KEY),
-                           comfy_local_ok=bool(COMFY_LOCAL_URL))
+                           fal_ok=False,  # fal.ai removed 2026-05-24; kept for template back-compat
+                           comfy_local_ok=bool(COMFY_LOCAL_URL),
+                           longcat_local_ok=bool(LONGCAT_LOCAL_URL))
 
 
 @app.route("/generate", methods=["POST"])
@@ -1628,25 +1565,10 @@ def scene_art():
     # we can afford to wait. For the viewer, Pollinations is instant and
     # the Wan animation clips overlay it anyway.
 
-    # fal.ai Hunyuan (admin/monarch, paid — only when fal has balance)
-    use_fal = tier in ("monarch", "admin") and bool(FAL_KEY)
-    if use_fal:
-        cached = _SCENE_ART_CACHE.get(cache_key)
-        if cached:
-            return Response(cached, mimetype="image/jpeg",
-                            headers={"Cache-Control": "public, max-age=3600",
-                                     "X-Image-Source": "fal-hunyuan-cached"})
-        img_bytes = _fal_image(prompt, w, h, model="hunyuan", seed=seed)
-        if img_bytes:
-            if len(_SCENE_ART_CACHE) >= _SCENE_ART_CACHE_MAX:
-                _SCENE_ART_CACHE.clear()
-            _SCENE_ART_CACHE[cache_key] = img_bytes
-            return Response(img_bytes, mimetype="image/jpeg",
-                            headers={"Cache-Control": "public, max-age=3600",
-                                     "X-Image-Source": "fal-hunyuan"})
-        # fal failed → fall through to Pollinations
-
-    # 3. Pollinations (free fallback for all tiers)
+    # Pollinations (free for all tiers). Previously routed admin/monarch
+    # through fal.ai Hunyuan, but Justen's fal.ai balance was perpetually
+    # 0, so every paid-tier scene fell back to Pollinations anyway — kept
+    # the simpler single-source code path.
     pollinations_url = (
         f"https://image.pollinations.ai/prompt/{quote(prompt)}"
         f"?width={w}&height={h}&seed={seed or 0}&nologo=true&enhance=true&model=flux"
@@ -1703,10 +1625,9 @@ def _do_scene_video(key: str, prompt: str, seed: int, image_url: str,
         # elapsed_seconds into it for the export status feed).
         sub_job = {"start_time": time.time(), "message": "", "elapsed_seconds": 0}
 
-        # Try local GPU first — it's free for admin and Justen's fal.ai balance
-        # is the gating issue on this account. The 60fps interpolation pass
-        # downstream smooths the 5B output so motion is clean either way.
-        # fal.ai stays as a backup when the home GPU is offline.
+        # Local GPU only (Wan 2.2 5B via ComfyUI tunnel). fal.ai used to
+        # be the backup here but Justen's balance kept hitting 0, so the
+        # backup was effectively never available — dropped 2026-05-24.
         vid_path = None
         if COMFY_LOCAL_URL and not _comfy_locked():
             # Scene viewer uses 81 frames (3.4 sec @ 24fps) — longer than the
@@ -1716,14 +1637,9 @@ def _do_scene_video(key: str, prompt: str, seed: int, image_url: str,
                         "message": "Generating motion on local GPU…"})
             vid_path = animate_scene_comfy(img_path, prompt, tmp, 0, sub_job, length=81)
 
-        if (not vid_path or not os.path.exists(vid_path)) and FAL_KEY and not _fal_locked():
-            job.update({"status": "generating", "progress": 30,
-                        "message": "Local GPU offline, falling back to fal.ai Wan 2.5…"})
-            vid_path = animate_scene_fal(img_path, prompt, tmp, 0, sub_job, model="wan")
-
         if not vid_path or not os.path.exists(vid_path):
             job.update({"status": "failed",
-                        "message": "Animation unavailable — local GPU offline and fal.ai exhausted"})
+                        "message": "Animation unavailable — start ComfyUI + cloudflared tunnel on the home PC"})
             return
 
         # Post-pass: ffmpeg motion-interpolate native 24fps → TARGET_FPS (60) for
@@ -1989,81 +1905,105 @@ def animate_scene_local(img_path, scene, tmp_dir, scene_idx, job):
     return None
 
 
-def animate_scene_fal(img_path, prompt, tmp_dir, scene_idx, job, model="wan"):
-    """
-    Animates a scene using fal.ai.
+# ── LongCat-Video local backend ────────────────────────────────────────────────
+#
+# When `LONGCAT_LOCAL_URL` env var is set, admin/monarch animation calls can
+# route to a LongCat-Video HTTP wrapper running on Justen's home GPU. LongCat
+# is Meituan's 13.6B foundation video model — much larger than Wan 2.2 5B, so
+# it WILL NOT fit on a 16 GB GPU at bf16 (~27 GB weights). Needs either:
+#   - a community fp8/GGUF quant when one ships, OR
+#   - a 24 GB+ GPU
+# Wired in defensively so the env var stays unset until both conditions hold;
+# the dispatch chain falls through to comfy_local (Wan 2.2 5B) automatically.
+#
+# Expected HTTP server contract (Justen writes this when running locally):
+#   POST  /longcat/i2v   { image: base64, prompt: str, num_frames: int,
+#                          resolution: "480p" | "720p" } -> { job_id }
+#   GET   /longcat/status/<job_id> -> { status: "pending"|"done"|"failed",
+#                                       mp4_url: str (when done) }
+#   GET   /longcat/file/<filename>.mp4 -> raw mp4 bytes
+# Same shape as the ComfyUI bridge so it's a one-line wiring change in
+# do_export when ready.
+_LONGCAT_LOCKED_UNTIL: float = 0.0
 
-    Models (chosen by cost/quality tradeoff):
-      - "wan"  -> fal-ai/wan-25-preview/image-to-video at 480p
-                  ~$0.05/sec × 5s = $0.25/clip. Default for Hunter tier.
-                  Solid anime motion, fast turnaround.
-      - "kling"-> fal-ai/kling-video/v1.6/pro/image-to-video
-                  ~$0.07/sec × 5s = $0.35/clip. Premium / Monarch tier.
-                  Stronger camera choreography and consistency.
+def _longcat_locked() -> bool:
+    return time.time() < _LONGCAT_LOCKED_UNTIL
 
-    Why two tiers: an animated movie has 24 clips. At Kling pricing a single
-    movie export costs ~$8.40 in fal calls; at Wan pricing it's ~$6.00. We
-    default to the cheaper model and only fall back to Kling on Wan failure.
-    """
-    if not FAL_KEY or _fal_locked():
+def _mark_longcat_locked(reason: str = "") -> None:
+    global _LONGCAT_LOCKED_UNTIL
+    _LONGCAT_LOCKED_UNTIL = time.time() + 300
+    print(f"[longcat-local] circuit open for 5 min — {reason}", flush=True)
+
+def _longcat_headers() -> dict:
+    h = {}
+    if LONGCAT_LOCAL_TOKEN:
+        h["Authorization"] = f"Bearer {LONGCAT_LOCAL_TOKEN}"
+    return h
+
+
+def animate_scene_longcat(img_path, prompt, tmp_dir, scene_idx, job,
+                          num_frames: int = 93, resolution: str = "480p"):
+    """Animate one scene via the LongCat-Video HTTP wrapper. Mirrors the
+    contract of animate_scene_comfy so the dispatch chain in do_export
+    can just pick this branch instead. Returns local mp4 path on success,
+    None on any failure (caller falls through to comfy_local or static).
+
+    num_frames=93 ≈ 6 sec at 15fps (LongCat native), close to the existing
+    Wan-clip length so audio sync isn't disturbed. resolution="480p" is
+    the demo default and the only one realistic on a 16 GB GPU; "720p"
+    needs the refinement_lora pass which is heavier."""
+    if not LONGCAT_LOCAL_URL or _longcat_locked():
         return None
 
-    import fal_client
-
-    clean_prompt = prompt[:400].split(",")[0] + ", fluid anime motion, cinematic camera"
-
+    import base64
+    headers = _longcat_headers()
     try:
-        job["message"] = f"Scene {scene_idx+1} — uploading to fal.ai…"
-        fal_img_url = fal_client.upload_file(img_path)
-
-        if model == "kling":
-            endpoint = "fal-ai/kling-video/v1.6/pro/image-to-video"
-            args = {
-                "image_url":    fal_img_url,
-                "prompt":       clean_prompt,
-                "duration":     str(ANIM_CLIP_DUR),
-                "aspect_ratio": "16:9",
-            }
-            job["message"] = f"Scene {scene_idx+1} — animating with Kling Pro…"
-        else:
-            # Wan 2.5 — same model create.wan.video runs in their explore page.
-            # Resolution is configurable via WAN_RESOLUTION env var (480p / 720p /
-            # 1080p). Default 720p because 480p had visibly rough motion and
-            # 1080p triples the cost; 720p matches what the official site uses.
-            endpoint = "fal-ai/wan-25-preview/image-to-video"
-            args = {
-                "image_url":  fal_img_url,
-                "prompt":     clean_prompt,
-                "resolution": WAN_RESOLUTION,
-                "duration":   str(ANIM_CLIP_DUR),
-            }
-            job["message"] = f"Scene {scene_idx+1} — animating with Wan 2.5 @ {WAN_RESOLUTION}…"
-
-        # subscribe() blocks until complete and handles all polling internally
-        result = fal_client.subscribe(endpoint, arguments=args, with_logs=False)
-
-        # Response shape varies; both Wan and Kling return {"video": {"url": ...}}
-        vid_url = (result.get("video") or {}).get("url")
-        if not vid_url:
-            vids    = result.get("videos") or []
-            vid_url = vids[0].get("url") if vids else None
-
-        if not vid_url:
+        with open(img_path, "rb") as fh:
+            img_b64 = base64.b64encode(fh.read()).decode("ascii")
+        job["message"] = f"Scene {scene_idx+1} — submitting to LongCat-Video…"
+        sub = http.post(f"{LONGCAT_LOCAL_URL}/longcat/i2v",
+                        json={"image": img_b64, "prompt": prompt[:1000],
+                              "num_frames": num_frames, "resolution": resolution},
+                        headers=headers, timeout=30)
+        sub.raise_for_status()
+        job_id = sub.json().get("job_id")
+        if not job_id:
+            _mark_longcat_locked("no job_id returned from /longcat/i2v")
             return None
 
-        job["message"] = f"Scene {scene_idx+1} — downloading clip…"
-        vid_bytes = http.get(vid_url, timeout=120).content
-        out_path  = os.path.join(tmp_dir, f"anim_{scene_idx}.mp4")
-        with open(out_path, "wb") as fh:
-            fh.write(vid_bytes)
+        deadline = time.time() + 900  # 15 min — LongCat is slow even on big GPUs
+        mp4_url = None
+        while time.time() < deadline:
+            time.sleep(3)
+            try:
+                st = http.get(f"{LONGCAT_LOCAL_URL}/longcat/status/{job_id}",
+                              headers=headers, timeout=15)
+                if st.status_code != 200:
+                    continue
+                data = st.json()
+                if data.get("status") == "done":
+                    mp4_url = data.get("mp4_url")
+                    break
+                if data.get("status") == "failed":
+                    _mark_longcat_locked(f"job failed: {str(data.get('error',''))[:80]}")
+                    return None
+            except Exception:
+                continue
+        if not mp4_url:
+            _mark_longcat_locked("generation timed out (15min)")
+            return None
 
+        full_url = mp4_url if mp4_url.startswith("http") else f"{LONGCAT_LOCAL_URL}{mp4_url}"
+        v = http.get(full_url, headers=headers, timeout=120)
+        v.raise_for_status()
+        out_path = os.path.join(tmp_dir, f"anim_{scene_idx}.mp4")
+        with open(out_path, "wb") as fh:
+            fh.write(v.content)
         job["elapsed_seconds"] = int(time.time() - job["start_time"])
         return out_path
 
     except Exception as exc:
-        msg = str(exc)
-        if "User is locked" in msg or "Exhausted balance" in msg:
-            _mark_fal_locked(f"animation — {msg[:80]}")
+        _mark_longcat_locked(f"animate — {str(exc)[:80]}")
         return None
 
 
@@ -2463,14 +2403,11 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
                 job["eta_seconds"] = int(elapsed / i * (n - i))
 
             # ── Step 1: Generate scene image (live preview shown here) ──
-            # Order: photoreal-local (admin only) -> fal.ai Hunyuan -> Pollinations.
-            # The job message reflects what will actually fire — saying
-            # "Hunyuan 3.0" when fal is circuit-locked just confuses users.
-            if FAL_KEY and not _fal_locked():
-                gen_label = "Hunyuan 3.0"
-            else:
-                gen_label = "Pollinations"
-            job["message"] = f"Scene {i+1}/{n} — generating art ({gen_label})…"
+            # Order: photoreal-local (admin only, style="photoreal") -> Pollinations.
+            # fal.ai Hunyuan path was removed 2026-05-24 (Justen's balance was
+            # always at 0 anyway, so every "Hunyuan" log was followed by a
+            # silent fallthrough to Pollinations).
+            job["message"] = f"Scene {i+1}/{n} — generating art (Pollinations)…"
             img_path = os.path.join(tmp, f"img_{i}.jpg")
             raw_prompt = _build_scene_image_prompt(sc, characters_by_name, style_suffix)
             # Stable per-scene seed bound to the run seed → same characters across rerolls
@@ -2487,10 +2424,6 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
                 img_bytes = _comfy_image_photoreal(raw_prompt, W, H, seed)
                 if img_bytes:
                     job["message"] = f"Scene {i+1}/{n} — photoreal art ready ✓"
-            if not img_bytes and FAL_KEY and not _fal_locked():
-                img_bytes = _fal_image(raw_prompt, W, H, model="hunyuan", seed=seed)
-                if img_bytes:
-                    job["message"] = f"Scene {i+1}/{n} — Hunyuan art ready ✓"
             if not img_bytes:
                 # Pollinations fallback — retry + model fallback (flux x2 -> turbo)
                 # so one slow Pollinations request can't stall the whole export.
@@ -2517,50 +2450,43 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
                 Image.new("RGB", (W, H), (5, 10, 25)).save(img_path, "JPEG")
 
             # ── Step 2: Animate ──
-            # Three animation paths:
-            #   anim_model="wan"    → fal.ai Wan 2.5 (cheap, ~$0.25/clip)
-            #   anim_model="kling"  → fal.ai Kling 1.6 Pro (premium, ~$0.35/clip)
-            #   anim_model="local"  → FFmpeg cinematic zoompan (free but SLOW on
-            #                          Render free tier — ~60s/scene shared vCPU)
-            #
-            # When fal.ai is the chosen path and fails (balance exhausted, network),
-            # we *don't* fall back to local FFmpeg anymore — it's so slow on shared
-            # CPU that users think the export hung. Instead we use the static image
-            # for that scene and surface a clear message so the user knows fal.ai
-            # is the gating issue. Total export time on free tier drops from
-            # 5-10 min back to ~1-2 min when balance is the only blocker.
+            # Animation paths (all run on Justen's home GPU via tunnels):
+            #   anim_model="longcat"        → LongCat-Video 13.6B (needs 24GB+
+            #                                  GPU; gracefully falls through to
+            #                                  comfy_local when LONGCAT_LOCAL_URL
+            #                                  is unset)
+            #   anim_model="comfy_local"    → ComfyUI + Wan 2.2 5B (default)
+            #   anim_model="comfy_cogvideox"→ ComfyUI + CogVideoX-5B GGUF Q4
+            #   anim_model="local"          → FFmpeg cinematic zoompan (free,
+            #                                  slow on Render shared CPU)
+            # fal.ai paths (wan/kling) dropped 2026-05-24.
             vid_path = None
             if animate:
-                # Dispatch order matters: comfy_local first because it's free for admin,
-                # fal.ai second because paying users fund it, FFmpeg zoompan last because
-                # it's slow on Render shared CPU. Each path falls through to the next
-                # only when the previous one is unavailable / circuit-broken / explicitly
-                # not chosen — we never silently swap a paid model for a free one mid-run.
-                if anim_model in ("comfy_local", "comfy_cogvideox") and COMFY_LOCAL_URL and not _comfy_locked():
+                # Dispatch order: LongCat (if explicitly requested AND URL set)
+                # -> comfy_local family -> ffmpeg zoompan. Each falls through to
+                # the next when unavailable / circuit-broken / not chosen.
+                if anim_model == "longcat" and LONGCAT_LOCAL_URL and not _longcat_locked():
+                    vid_path = animate_scene_longcat(img_path, raw_prompt, tmp, i, job)
+                    if vid_path:
+                        job["message"] = f"Scene {i+1}/{n} — LongCat-Video animation done ✓"
+                    elif COMFY_LOCAL_URL and not _comfy_locked():
+                        job["message"] = f"Scene {i+1}/{n} — LongCat unavailable, falling back to Wan 2.2 5B…"
+                        vid_path = animate_scene_comfy(img_path, raw_prompt, tmp, i, job, backend="wan")
+                        if vid_path:
+                            job["message"] = f"Scene {i+1}/{n} — Wan local GPU animation done ✓"
+                        else:
+                            job["message"] = f"Scene {i+1}/{n} — local GPU unreachable, using static art"
+                    else:
+                        job["message"] = f"Scene {i+1}/{n} — LongCat unavailable, using static art"
+                elif anim_model in ("comfy_local", "comfy_cogvideox", "wan", "kling") and COMFY_LOCAL_URL and not _comfy_locked():
                     backend = "cogvideox" if anim_model == "comfy_cogvideox" else "wan"
                     vid_path = animate_scene_comfy(img_path, raw_prompt, tmp, i, job,
                                                    backend=backend)
                     label = "CogVideoX" if backend == "cogvideox" else "Wan"
                     if vid_path:
                         job["message"] = f"Scene {i+1}/{n} — {label} local GPU animation done ✓"
-                    elif FAL_KEY and not _fal_locked():
-                        # Justen's PC offline / tunnel dropped → fall through to fal.ai
-                        # so an in-flight admin export doesn't die when the home GPU
-                        # disconnects mid-render.
-                        job["message"] = f"Scene {i+1}/{n} — local GPU unreachable, trying fal.ai…"
-                        vid_path = animate_scene_fal(img_path, raw_prompt, tmp, i, job, model="wan")
-                        if vid_path:
-                            job["message"] = f"Scene {i+1}/{n} — fal.ai fallback animation done ✓"
-                        else:
-                            job["message"] = f"Scene {i+1}/{n} — both local GPU and fal.ai unavailable. Using static art."
                     else:
                         job["message"] = f"Scene {i+1}/{n} — local GPU unreachable, using static art"
-                elif anim_model in ("wan", "kling") and FAL_KEY and not _fal_locked():
-                    vid_path = animate_scene_fal(img_path, raw_prompt, tmp, i, job, model=anim_model)
-                    if vid_path:
-                        job["message"] = f"Scene {i+1}/{n} — {anim_model} animation done ✓"
-                    else:
-                        job["message"] = f"Scene {i+1}/{n} — fal.ai unavailable (top up balance for real motion). Using static art."
                 elif anim_model == "local":
                     # User explicitly picked local — honor it even though it's slow.
                     vid_path = animate_scene_local(img_path, sc, tmp, i, job)
@@ -2568,16 +2494,15 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
                         job["message"] = f"Scene {i+1}/{n} — zoom motion ready ✓"
                     else:
                         job["message"] = f"Scene {i+1}/{n} — animation failed, using static art"
-                elif _fal_locked():
-                    job["message"] = f"Scene {i+1}/{n} — fal.ai balance exhausted, using static art"
-                # Else: no FAL_KEY and not local — just use static
+                else:
+                    job["message"] = f"Scene {i+1}/{n} — no animation backend available, using static art"
 
                 # ── Step 2b: motion-interpolate animated clips to TARGET_FPS ──
-                # Wan / Kling deliver 24fps natively; the FFmpeg zoompan path is
-                # already 30fps. Interpolating zoompan would be wasted work, so
-                # only smooth the real-motion paths. Silent fallback to the raw
-                # clip on any failure so a single bad scene can't tank the export.
-                if vid_path and anim_model in ("wan", "kling", "comfy_local", "comfy_cogvideox"):
+                # Real-motion paths (LongCat, Wan, CogVideoX) deliver 15-24fps
+                # natively; the FFmpeg zoompan path is already 30fps. Smooth
+                # only the real-motion paths. Silent fallback to the raw clip
+                # on any failure so a single bad scene can't tank the export.
+                if vid_path and anim_model in ("longcat", "comfy_local", "comfy_cogvideox", "wan", "kling"):
                     smooth_path = os.path.join(tmp, f"smooth_{i:03d}.mp4")
                     job["message"] = f"Scene {i+1}/{n} — smoothing to {TARGET_FPS}fps…"
                     if _interpolate_to_target_fps(vid_path, smooth_path):
@@ -3010,47 +2935,39 @@ def start_export():
     style_key  = (data.get("style") or DEFAULT_STYLE).strip()
     if style_key not in STYLES:
         style_key = DEFAULT_STYLE
-    # Animation model selection. "local" = free FFmpeg zoompan (Ken Burns; not real
-    # motion — what Justen called "back and forth"). "wan" = fal.ai Wan 2.5 real
-    # anime motion (~$0.25/clip), fluent and the default for everyone. "kling" =
-    # premium Kling 1.6 Pro (~$0.35/clip). "comfy_local" = Justen's home RTX 4070
-    # Ti SUPER running Wan 2.2 5B — opt-in only, never the default, because the
-    # 5B model produces visibly stiff motion compared to fal.ai's hosted Wan 2.5
-    # and admin should see the same fluent output everyone else sees.
+    # Animation model selection. Post fal.ai removal (2026-05-24) the only
+    # backends are local Justen-PC GPUs:
+    #   "local"            -> FFmpeg cinematic zoompan (Ken Burns, no GPU)
+    #   "comfy_local"      -> ComfyUI + Wan 2.2 5B I2V (fast, default)
+    #   "comfy_cogvideox"  -> ComfyUI + CogVideoX-5B GGUF Q4 (slower, higher quality)
+    #   "longcat"          -> LongCat-Video 13.6B (best, needs 24GB+ GPU)
+    # Legacy "wan"/"kling" values from the old fal.ai era are accepted and
+    # silently mapped to "comfy_local" below for backwards compatibility.
     anim_model = (data.get("anim_model") or "").strip()
-    # comfy_cogvideox added 2026-05-23: same routing as comfy_local but uses
-    # CogVideoX-5B-I2V GGUF Q4 instead of Wan 2.2 5B. Slower (~8-12 min/clip)
-    # but higher quality. Admin-only since it ties up the local GPU longer.
-    if anim_model not in ("local", "wan", "kling", "comfy_local", "comfy_cogvideox"):
+    if anim_model not in ("local", "wan", "kling", "comfy_local", "comfy_cogvideox", "longcat"):
         anim_model = ""  # empty → tier default below
-    # Only admin can request the local-GPU paths — it's his hardware; paying users
-    # get consistent latency by going through fal.ai's hosted SLA.
-    if anim_model in ("comfy_local", "comfy_cogvideox") and tier != "admin":
-        anim_model = "wan"
+    # Tier-gate the heavy local-GPU paths. comfy_cogvideox and longcat are
+    # admin-only because they tie up Justen's single home GPU for many
+    # minutes per clip; paying tiers (hunter/monarch) get comfy_local (Wan
+    # 2.2 5B, fast) which is also tied to admin's GPU but quick enough.
+    if anim_model in ("comfy_cogvideox", "longcat") and tier != "admin":
+        anim_model = "comfy_local"
+    # Legacy frontend values from before fal.ai removal — translate to the
+    # equivalent local-GPU path so existing UI keeps working.
+    if anim_model in ("wan", "kling"):
+        anim_model = "comfy_local"
     if not anim_model:
-        # Admin always prefers the home GPU when its tunnel URL is set —
-        # that's the whole point of the local rig: free unlimited animation.
-        # Paying tiers go to fal.ai Wan for consistent latency. The 60fps
-        # motion-interpolation pass applies to comfy_local output too, so
-        # the home GPU's 5B clips get smoothed before they reach the user.
-        if tier == "admin" and COMFY_LOCAL_URL:
+        # Default routing now that fal.ai is gone:
+        #   admin + LongCat URL set            -> longcat (best quality, slowest)
+        #   admin + comfy_local                -> comfy_local (Wan 2.2 5B, fast)
+        #   monarch/hunter + comfy_local       -> comfy_local (Wan via admin's GPU)
+        #   anyone else / no tunnel            -> local (FFmpeg zoompan, no GPU)
+        if tier == "admin" and LONGCAT_LOCAL_URL:
+            anim_model = "longcat"
+        elif COMFY_LOCAL_URL and tier in ("admin", "monarch", "hunter"):
             anim_model = "comfy_local"
-        elif FAL_KEY and tier in ("admin", "monarch", "hunter"):
-            anim_model = "wan"
         else:
             anim_model = "local"
-    # Tier-gate the premium paid models
-    if anim_model == "kling" and tier not in ("monarch", "admin"):
-        anim_model = "wan"
-    if anim_model in ("wan", "kling") and not FAL_KEY:
-        anim_model = "local"   # no key → free fallback
-    # Admin override: if the frontend defaulted to "wan"/"kling" but the home
-    # GPU tunnel is up, route to local instead — admin shouldn't burn fal.ai
-    # credits when free local hardware is available. Defaults to Wan
-    # (comfy_local) not CogVideoX since Wan is 5× faster — admin opts into
-    # CogVideoX explicitly when they want hero-scene quality.
-    if tier == "admin" and COMFY_LOCAL_URL and anim_model in ("wan", "kling"):
-        anim_model = "comfy_local"
     if quality == "4k" and tier not in ("monarch", "admin"):
         quality = "1080p"
     # Hard cap when the host can't deliver 4K. Render's 512MB free-tier
@@ -3064,9 +2981,13 @@ def start_export():
     _max_quality = os.environ.get("MAX_RENDER_QUALITY", "").strip().lower()
     if _max_quality == "1080p" and quality == "4k":
         quality = "1080p"
-    if animate and not FAL_KEY and anim_model not in ("local", "comfy_local", "comfy_cogvideox"):
-        # Animate requested with paid model but no FAL key — degrade gracefully.
-        # Local-GPU paths are exempt because they use Justen's GPU, not fal.ai.
+    # Final safety net: if we ended up with an anim_model whose backend is
+    # unavailable (e.g. longcat picked but tunnel down, or comfy_local picked
+    # but COMFY_LOCAL_URL unset), degrade to "local" (FFmpeg zoompan) so the
+    # export still produces something rather than 5 scenes of static art.
+    if animate and anim_model == "longcat" and not LONGCAT_LOCAL_URL:
+        anim_model = "comfy_local" if COMFY_LOCAL_URL else "local"
+    if animate and anim_model in ("comfy_local", "comfy_cogvideox") and not COMFY_LOCAL_URL:
         anim_model = "local"
     if not story or not story.get("scenes"):
         return jsonify({"error": "No story provided"}), 400
@@ -3190,13 +3111,14 @@ def admin_panel():
             "seasons":  db.execute("SELECT COUNT(*) FROM seasons").fetchone()[0],
         }
     pp_ok  = bool(PAYPAL_CLIENT_ID and PAYPAL_SECRET and PAYPAL_PLAN_HUNTER and PAYPAL_PLAN_MONARCH)
-    fal_ok = bool(FAL_KEY)
     return render_template("admin.html",
                            users=[dict(u) for u in users],
                            stats=stats,
                            pp_ok=pp_ok,
                            pp_mode=PAYPAL_MODE,
-                           fal_ok=fal_ok,
+                           fal_ok=False,  # fal.ai removed 2026-05-24; kept for template back-compat
+                           comfy_local_ok=bool(COMFY_LOCAL_URL),
+                           longcat_local_ok=bool(LONGCAT_LOCAL_URL),
                            email=session.get("email", ""))
 
 
