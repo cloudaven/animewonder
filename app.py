@@ -2424,14 +2424,17 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
 
         # Target output dims. The 4K branch is what the user pays for.
         OUT_W, OUT_H = (3840, 2160) if quality == "4k" else (1920, 1080)
-        # Per-scene RENDER dims are always capped at 1080p — Render's 512MB
-        # free-tier worker can't survive a 4K per-scene ffmpeg encode (libx264
-        # ultrafast at 3840×2160 with even one reference frame in RAM pushes
-        # gunicorn+Python+PIL past the cap and gets SIGKILLed mid-scene).
-        # We do the 4K upscale ONCE at the final concat-filter pass, where
-        # ffmpeg streams frames without numpy roundtrips. That single pass
-        # uses ~150MB of bounded RAM regardless of output resolution.
-        W, H = 1920, 1080
+        # Per-scene RENDER dims. Capped at 720p on Render free tier — even
+        # 1080p per-scene encode + accumulated SDK/httpx state crosses the
+        # 512MB worker cap on real Claude stories (matrix test showed
+        # SIGKILL at scene 1 even at 1080p). 720p reduces PIL/ffmpeg RAM by
+        # ~4x, then we upscale at the final concat pass. Override via env
+        # var SCENE_RENDER_W on Starter+ plans to get 1080p per-scene.
+        _render_w = int(os.environ.get("SCENE_RENDER_W", "0") or 0)
+        if _render_w >= 1920:
+            W, H = 1920, 1080
+        else:
+            W, H = 1280, 720
         job["scenes_total"] = n
         # Use a stable per-export seed so re-runs of the same story produce the same characters
         run_seed = abs(hash((story.get("title",""), style_key))) % 100000
