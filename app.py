@@ -2589,20 +2589,64 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
                 if audio:
                     audio = audio.with_effects([moviepy.afx.AudioFadeIn(0.5), moviepy.afx.AudioFadeOut(1.0)])
                     clip  = clip.with_audio(audio)
-            # Normalize to target dims so ffmpeg concat-demuxer can stream-copy
+            # Normalize to target dims so ffmpeg concat-demuxer can stream-copy.
+            # Why: if one scene comes out at 1280×720 (Wan native) while siblings
+            # are at the target W×H, the concat-demuxer below fails. Older code
+            # swallowed any resize error, which then crashed the WHOLE export at
+            # the final concat step with a cryptic ffmpeg error. We now force a
+            # known-good size via PIL re-render as a safety net.
             try:
                 clip = clip.resized((W, H))
-            except Exception:
-                pass
+            except Exception as _resize_exc:
+                # Last-resort: rebuild from a re-saved still at exact (W,H) so
+                # downstream concat sees uniform dims. Loses motion for this
+                # one scene but the export survives.
+                try:
+                    from PIL import Image as _PIL
+                    fallback_path = os.path.join(tmp, f"resize_fallback_{i}.jpg")
+                    _PIL.open(img_path).convert("RGB").resize((W, H), _PIL.LANCZOS).save(
+                        fallback_path, "JPEG", quality=88)
+                    if clip is not None:
+                        try: clip.close()
+                        except Exception: pass
+                    clip = ImageClip(fallback_path, duration=duration if audio is None else audio.duration)
+                    if audio:
+                        clip = clip.with_audio(audio)
+                except Exception:
+                    pass
 
             scene_out = os.path.join(tmp, f"final_scene_{i:03d}.mp4")
             # Final encode at TARGET_FPS (60) so the stitched output preserves
             # the interpolated smoothness. Static-image scenes get duplicated
             # frames at 60fps — slightly larger file, no visual cost.
-            clip.write_videofile(
-                scene_out, fps=TARGET_FPS, codec="libx264", audio_codec="aac",
+            #
+            # We ALWAYS write an audio track (silent if no TTS) so the
+            # concat-demuxer below sees a uniform stream layout across scenes.
+            # Mixed-audio inputs would otherwise fall through to the re-encode
+            # path on every export.
+            write_kwargs = dict(
+                fps=TARGET_FPS, codec="libx264", audio_codec="aac",
                 threads=2, preset="ultrafast", logger=None,
             )
+            if clip.audio is None:
+                # Inject a silent track matching clip duration so the per-scene
+                # MP4 always has both v+a streams. Use a numpy zero array via
+                # AudioArrayClip so we don't need extra deps.
+                try:
+                    from moviepy import AudioArrayClip
+                    import numpy as _np
+                    _sr = 44100
+                    _silent = AudioArrayClip(
+                        _np.zeros((int(max(0.05, clip.duration) * _sr), 2),
+                                  dtype="float32"),
+                        fps=_sr,
+                    )
+                    clip = clip.with_audio(_silent)
+                except Exception:
+                    # Even without the silent track we still attempt to write —
+                    # the concat-filter fallback further down handles missing audio.
+                    write_kwargs.pop("audio_codec", None)
+            clip.write_videofile(scene_out, **write_kwargs)
             # Release frame buffers before next scene
             try: clip.close()
             except Exception: pass
@@ -2658,16 +2702,93 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
                 capture_output=True, timeout=600,
             )
             if res.returncode != 0:
-                # Stream-copy can fail if per-scene encoders drifted on params;
-                # fall back to a full re-encode pass (slower but always works).
-                subprocess.run(
+                # Stream-copy fell over (usually mismatched stream params
+                # across scenes). Try a same-demuxer re-encode first because
+                # it's the cheapest path that still works for matching layouts.
+                res2 = subprocess.run(
                     [ffmpeg, "-y", "-f", "concat", "-safe", "0",
                      "-i", concat_list,
                      "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
                      "-c:a", "aac", "-movflags", "+faststart",
                      out_path],
-                    check=True, capture_output=True, timeout=900,
+                    capture_output=True, timeout=900,
                 )
+                if res2.returncode != 0:
+                    # Real "always works" path: concat FILTER (not demuxer)
+                    # with per-input scale + sar + format + resample so any
+                    # drift in resolution / sample rate / channel count gets
+                    # normalized to the target before concat. More expensive
+                    # but immune to the layout-must-match constraint that
+                    # tripped both attempts above.
+                    #
+                    # For any input that lacks an audio stream we substitute
+                    # silence of the matching duration from a global anullsrc
+                    # input — [N:a:0] would otherwise fail to bind and abort
+                    # the whole filtergraph.
+                    def _has_audio(path: str) -> bool:
+                        try:
+                            r = subprocess.run([ffmpeg, "-i", path],
+                                               capture_output=True, timeout=20)
+                            return b"Audio:" in (r.stderr or b"")
+                        except Exception:
+                            return False
+
+                    def _duration(path: str) -> float:
+                        try:
+                            r = subprocess.run([ffmpeg, "-i", path],
+                                               capture_output=True, timeout=20)
+                            txt = (r.stderr or b"").decode("utf-8", "replace")
+                            m = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", txt)
+                            if m:
+                                return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+                        except Exception:
+                            pass
+                        return 5.0
+
+                    inputs: list[str] = []
+                    has_audio_per_clip: list[bool] = []
+                    for p in clips:
+                        inputs.extend(["-i", p])
+                        has_audio_per_clip.append(_has_audio(p))
+
+                    # Add one silent source we can slice for missing-audio scenes.
+                    silent_idx = len(clips)
+                    inputs.extend(["-f", "lavfi", "-i",
+                                   "anullsrc=channel_layout=stereo:sample_rate=44100"])
+
+                    parts: list[str] = []
+                    for idx in range(len(clips)):
+                        parts.append(
+                            f"[{idx}:v:0]scale={W}:{H}:force_original_aspect_ratio=decrease,"
+                            f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p,"
+                            f"fps={TARGET_FPS}[v{idx}];"
+                        )
+                        if has_audio_per_clip[idx]:
+                            parts.append(
+                                f"[{idx}:a:0]aresample=44100,"
+                                f"aformat=sample_fmts=fltp:channel_layouts=stereo[a{idx}];"
+                            )
+                        else:
+                            dur = _duration(clips[idx])
+                            parts.append(
+                                f"[{silent_idx}:a]atrim=duration={dur:.3f},"
+                                f"asetpts=PTS-STARTPTS,"
+                                f"aformat=sample_fmts=fltp:channel_layouts=stereo[a{idx}];"
+                            )
+                    concat_inputs = "".join(f"[v{idx}][a{idx}]" for idx in range(len(clips)))
+                    filtergraph = (
+                        "".join(parts)
+                        + f"{concat_inputs}concat=n={len(clips)}:v=1:a=1[v][a]"
+                    )
+                    subprocess.run(
+                        [ffmpeg, "-y", *inputs,
+                         "-filter_complex", filtergraph,
+                         "-map", "[v]", "-map", "[a]",
+                         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
+                         "-c:a", "aac", "-movflags", "+faststart",
+                         out_path],
+                        check=True, capture_output=True, timeout=1500,
+                    )
         finally:
             encode_done.set()
             ticker.join(timeout=2)

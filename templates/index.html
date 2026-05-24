@@ -1693,7 +1693,7 @@
   async function confirmExport(){
     document.getElementById('exp-stage-preview').style.display='none';
     document.getElementById('exp-stage-render').style.display='';
-    document.getElementById('exp-quality-label').textContent=exportQuality.toUpperCase()+(exportAnimate?` · ${ANIM_BACKEND_LABEL.toUpperCase()}`:' · 60FPS');
+    document.getElementById('exp-quality-label').textContent=exportQuality.toUpperCase()+(exportAnimate?` · ${ANIM_BACKEND_LABEL.toUpperCase()} · 60FPS`:' · 60FPS');
     document.getElementById('exp-msg').textContent='Starting export...';
     document.getElementById('exp-bar').style.width='0%';
     document.getElementById('exp-pct').textContent='0%';
