@@ -2578,78 +2578,125 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
             # the target W/H/fps with H.264, close everything to release frame
             # buffers, then ffmpeg-concat all the per-scene MP4s at the end.
             # Memory now stays flat (~140MB peak) regardless of scene count.
+            scene_out = os.path.join(tmp, f"final_scene_{i:03d}.mp4")
+            # Two code paths:
+            #   - vid_path set (Wan/Kling/local-GPU animation succeeded): use
+            #     MoviePy so we get the audio attach + resize semantics for
+            #     small 720p video clips where it's cheap.
+            #   - vid_path None (static-image scene, including the "animate
+            #     requested but backend offline" degradation): skip MoviePy
+            #     entirely and let ffmpeg render the still directly. MoviePy's
+            #     ImageClip → numpy frame buffer → libx264 reference frames
+            #     was OOM-killing the 512 MB Render free-tier worker on every
+            #     4K export. ffmpeg streams frames natively and uses ~50 MB
+            #     regardless of resolution. The same pad+scale+setsar filter
+            #     keeps every scene at exact (W,H) so the final concat works.
+            ffmpeg_bin = _get_ffmpeg()
             if vid_path:
                 from moviepy import VideoFileClip
                 clip = VideoFileClip(vid_path)
                 if audio:
                     audio_trimmed = audio.subclipped(0, min(audio.duration, clip.duration))
                     clip = clip.with_audio(audio_trimmed)
-            else:
-                clip = ImageClip(img_path, duration=duration)
-                if audio:
-                    audio = audio.with_effects([moviepy.afx.AudioFadeIn(0.5), moviepy.afx.AudioFadeOut(1.0)])
-                    clip  = clip.with_audio(audio)
-            # Normalize to target dims so ffmpeg concat-demuxer can stream-copy.
-            # Why: if one scene comes out at 1280×720 (Wan native) while siblings
-            # are at the target W×H, the concat-demuxer below fails. Older code
-            # swallowed any resize error, which then crashed the WHOLE export at
-            # the final concat step with a cryptic ffmpeg error. We now force a
-            # known-good size via PIL re-render as a safety net.
-            try:
-                clip = clip.resized((W, H))
-            except Exception as _resize_exc:
-                # Last-resort: rebuild from a re-saved still at exact (W,H) so
-                # downstream concat sees uniform dims. Loses motion for this
-                # one scene but the export survives.
+                # Normalize to target dims so ffmpeg concat-demuxer can
+                # stream-copy. Wan clips come back at 1280×720; siblings may
+                # be at W×H. Silent failures here previously crashed the
+                # final concat — now we PIL-rebuild as a safety net.
                 try:
-                    from PIL import Image as _PIL
-                    fallback_path = os.path.join(tmp, f"resize_fallback_{i}.jpg")
-                    _PIL.open(img_path).convert("RGB").resize((W, H), _PIL.LANCZOS).save(
-                        fallback_path, "JPEG", quality=88)
-                    if clip is not None:
+                    clip = clip.resized((W, H))
+                except Exception:
+                    try:
+                        from PIL import Image as _PIL
+                        fallback_path = os.path.join(tmp, f"resize_fallback_{i}.jpg")
+                        _PIL.open(img_path).convert("RGB").resize(
+                            (W, H), _PIL.LANCZOS).save(fallback_path, "JPEG", quality=88)
+                        if clip is not None:
+                            try: clip.close()
+                            except Exception: pass
+                        clip = ImageClip(fallback_path,
+                                         duration=duration if audio is None else audio.duration)
+                        if audio:
+                            clip = clip.with_audio(audio)
+                    except Exception:
+                        pass
+
+                write_kwargs = dict(
+                    fps=TARGET_FPS, codec="libx264", audio_codec="aac",
+                    threads=2, preset="ultrafast", logger=None,
+                )
+                if clip.audio is None:
+                    # Inject silent stereo AAC so every scene MP4 has a
+                    # consistent v+a layout for the concat-demuxer.
+                    try:
+                        from moviepy import AudioArrayClip
+                        import numpy as _np
+                        _sr = 44100
+                        _silent = AudioArrayClip(
+                            _np.zeros((int(max(0.05, clip.duration) * _sr), 2),
+                                      dtype="float32"),
+                            fps=_sr,
+                        )
+                        clip = clip.with_audio(_silent)
+                    except Exception:
+                        write_kwargs.pop("audio_codec", None)
+                clip.write_videofile(scene_out, **write_kwargs)
+                try: clip.close()
+                except Exception: pass
+            else:
+                # Static-image scene — render via ffmpeg directly to avoid
+                # MoviePy's per-frame numpy buffer (the 4K-OOM offender).
+                # The pad+scale filter guarantees output is exactly W×H.
+                #   -loop 1 -i image     : repeat the still
+                #   -t duration          : stop after `duration` seconds
+                #   -r TARGET_FPS        : output framerate
+                #   -vf scale,pad,setsar : normalize to W×H, square pixels
+                #   pix_fmt yuv420p      : H.264 baseline-friendly
+                #   shortest+anullsrc OR audio.mp3 : audio is always present
+                vf = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
+                      f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p")
+                cmd = [ffmpeg_bin, "-y", "-loglevel", "error",
+                       "-loop", "1", "-i", img_path]
+                if audio and os.path.exists(audio_path):
+                    cmd.extend(["-i", audio_path])
+                else:
+                    # Silent stereo source — duration controlled by -t below.
+                    cmd.extend(["-f", "lavfi", "-i",
+                                "anullsrc=channel_layout=stereo:sample_rate=44100"])
+                cmd.extend([
+                    "-vf", vf,
+                    "-r", str(TARGET_FPS),
+                    "-t", f"{duration:.3f}",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
+                    # Force stereo 44.1kHz AAC so audio params match the
+                    # MoviePy video-scene path. Without -ar/-ac the gTTS
+                    # mono 24kHz source passes through verbatim and the
+                    # concat-demuxer trips on mixed exports.
+                    "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+                    "-shortest", "-movflags", "+faststart",
+                    scene_out,
+                ])
+                try:
+                    res = subprocess.run(cmd, capture_output=True, timeout=600)
+                    if res.returncode != 0:
+                        # ffmpeg path failed — fall back to MoviePy (legacy
+                        # path). May OOM at 4K but at least we tried.
+                        clip = ImageClip(img_path, duration=duration)
+                        if audio:
+                            audio = audio.with_effects([
+                                moviepy.afx.AudioFadeIn(0.5),
+                                moviepy.afx.AudioFadeOut(1.0)])
+                            clip = clip.with_audio(audio)
+                        try: clip = clip.resized((W, H))
+                        except Exception: pass
+                        clip.write_videofile(
+                            scene_out, fps=TARGET_FPS, codec="libx264",
+                            audio_codec="aac", threads=2, preset="ultrafast",
+                            logger=None)
                         try: clip.close()
                         except Exception: pass
-                    clip = ImageClip(fallback_path, duration=duration if audio is None else audio.duration)
-                    if audio:
-                        clip = clip.with_audio(audio)
-                except Exception:
+                except subprocess.TimeoutExpired:
                     pass
 
-            scene_out = os.path.join(tmp, f"final_scene_{i:03d}.mp4")
-            # Final encode at TARGET_FPS (60) so the stitched output preserves
-            # the interpolated smoothness. Static-image scenes get duplicated
-            # frames at 60fps — slightly larger file, no visual cost.
-            #
-            # We ALWAYS write an audio track (silent if no TTS) so the
-            # concat-demuxer below sees a uniform stream layout across scenes.
-            # Mixed-audio inputs would otherwise fall through to the re-encode
-            # path on every export.
-            write_kwargs = dict(
-                fps=TARGET_FPS, codec="libx264", audio_codec="aac",
-                threads=2, preset="ultrafast", logger=None,
-            )
-            if clip.audio is None:
-                # Inject a silent track matching clip duration so the per-scene
-                # MP4 always has both v+a streams. Use a numpy zero array via
-                # AudioArrayClip so we don't need extra deps.
-                try:
-                    from moviepy import AudioArrayClip
-                    import numpy as _np
-                    _sr = 44100
-                    _silent = AudioArrayClip(
-                        _np.zeros((int(max(0.05, clip.duration) * _sr), 2),
-                                  dtype="float32"),
-                        fps=_sr,
-                    )
-                    clip = clip.with_audio(_silent)
-                except Exception:
-                    # Even without the silent track we still attempt to write —
-                    # the concat-filter fallback further down handles missing audio.
-                    write_kwargs.pop("audio_codec", None)
-            clip.write_videofile(scene_out, **write_kwargs)
-            # Release frame buffers before next scene
-            try: clip.close()
-            except Exception: pass
             if audio:
                 try: audio.close()
                 except Exception: pass
