@@ -474,6 +474,19 @@ def login_required(f):
     return w
 
 
+@app.route("/health")
+def health():
+    """Ultra-light health endpoint for Render's probe.
+    Returns immediately without touching the DB, Jinja, sessions, or any
+    state — even under heavy CPU pressure from a concurrent ffmpeg encode
+    the response should land in <10ms, well under Render's 30s probe
+    timeout. Previously the probe hit /login which rendered the full
+    Jinja template; under CPU starvation that response went over the
+    probe timeout and Render flagged the server as failed, killing the
+    container mid-export."""
+    return "ok", 200, {"Content-Type": "text/plain"}
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
