@@ -2745,28 +2745,53 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
         # bare "ffmpeg" raises FileNotFoundError on any host where it isn't on
         # PATH (e.g. local Windows dev, where ffmpeg lives inside imageio_ffmpeg).
         ffmpeg = _get_ffmpeg()
+
+        # For 4K output we upscale each 1080p per-scene MP4 to 3840×2160
+        # ONE AT A TIME (separate ffmpeg processes), then concat-demuxer
+        # the upscaled scenes with -c copy. The previous filter_complex
+        # approach held decoders for every scene in parallel and pushed
+        # the 512MB Render worker over the edge during stitching. Doing
+        # the upscale per-scene keeps ffmpeg's peak at ~150MB regardless
+        # of scene count.
+        if (OUT_W, OUT_H) != (W, H):
+            upscaled: list[str] = []
+            for idx, p in enumerate(clips):
+                up_out = os.path.join(tmp, f"upscaled_{idx:03d}.mp4")
+                job["message"] = f"Upscaling scene {idx+1}/{len(clips)} to {OUT_W}×{OUT_H}…"
+                vf = (f"scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease,"
+                      f"pad={OUT_W}:{OUT_H}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p")
+                up_res = subprocess.run(
+                    [ffmpeg, "-y", "-loglevel", "error", "-i", p,
+                     "-vf", vf, "-r", str(TARGET_FPS),
+                     "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
+                     "-c:a", "copy",
+                     up_out],
+                    capture_output=True, timeout=600,
+                )
+                if up_res.returncode != 0:
+                    # If upscale fails on a single scene, fall through to the
+                    # filter_complex path below which handles drift. The
+                    # original 1080p clip is kept so concat still has something.
+                    upscaled = clips
+                    break
+                upscaled.append(up_out)
+            clips = upscaled  # downstream concat ops use the upscaled set
+
         concat_list = os.path.join(tmp, "concat.txt")
         with open(concat_list, "w") as fh:
             for p in clips:
                 # ffmpeg concat requires escaped single quotes for safety
                 fh.write(f"file '{p.replace(chr(39), chr(39)+chr(92)+chr(39)+chr(39))}'\n")
         try:
-            # When OUT_W != per-scene W (i.e. quality=="4k"), the cheap
-            # stream-copy path can't work — scenes are 1920×1080 and we need
-            # to upscale to 3840×2160. Skip straight to the filter_complex
-            # pass which streams + scales in one shot without per-scene
-            # re-encodes piling up RAM.
-            if (OUT_W, OUT_H) == (W, H):
-                res = subprocess.run(
-                    [ffmpeg, "-y", "-f", "concat", "-safe", "0",
-                     "-i", concat_list, "-c", "copy", "-movflags", "+faststart",
-                     out_path],
-                    capture_output=True, timeout=600,
-                )
-            else:
-                # Sentinel non-zero so the upscale path runs below.
-                class _Res: returncode = 1; stderr = b"skipped: upscale required"
-                res = _Res()
+            # Now that all clips are at OUT_W×OUT_H (either natively at 1080p
+            # or via the per-scene upscale loop above), -c copy works for
+            # both quality tiers.
+            res = subprocess.run(
+                [ffmpeg, "-y", "-f", "concat", "-safe", "0",
+                 "-i", concat_list, "-c", "copy", "-movflags", "+faststart",
+                 out_path],
+                capture_output=True, timeout=600,
+            )
             if res.returncode != 0:
                 # Stream-copy fell over (usually mismatched stream params
                 # across scenes, OR we deliberately skipped it to do a 4K
