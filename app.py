@@ -975,6 +975,37 @@ def speak():
         return jsonify({"error": str(e)}), 500
 
 
+def _edge_tts_to_mp3(text: str, voice: str, out_path: str) -> None:
+    """Synchronous wrapper around edge_tts that writes an mp3 to out_path.
+
+    Used by do_export for narration audio (Step 3) so exports get the same
+    Edge Neural voice quality as the in-app preview at /speak — instead of
+    the old robotic gTTS path. Runs a fresh asyncio event loop because
+    Flask threaded mode doesn't reuse one.
+
+    Raises on any failure so the caller can fall back to gTTS as a last
+    resort (rather than shipping a silent export).
+    """
+    if not text:
+        raise ValueError("empty text")
+    async def _gen():
+        comm = edge_tts.Communicate(text, voice)
+        chunks = []
+        async for chunk in comm.stream():
+            if chunk["type"] == "audio":
+                chunks.append(chunk["data"])
+        return b"".join(chunks)
+    loop = asyncio.new_event_loop()
+    try:
+        audio_bytes = loop.run_until_complete(_gen())
+    finally:
+        loop.close()
+    if not audio_bytes:
+        raise RuntimeError("edge_tts returned no audio")
+    with open(out_path, "wb") as fh:
+        fh.write(audio_bytes)
+
+
 # ── Story generation ───────────────────────────────────────────────────────────
 
 def build_prompt(concept, mode, style_key=DEFAULT_STYLE):
@@ -2030,7 +2061,7 @@ _WAN22_NEGATIVE_PROMPT = (
 )
 
 def _comfy_workflow_wan22_i2v(image_filename: str, prompt: str, seed: int,
-                              width: int = 1280, height: int = 704,
+                              width: int = 832, height: int = 480,
                               length: int = 49) -> dict:
     """Build the API-format graph ComfyUI's /prompt endpoint expects.
 
@@ -2039,6 +2070,13 @@ def _comfy_workflow_wan22_i2v(image_filename: str, prompt: str, seed: int,
     frames in RAM and 3 × 5-sec × 720p clips overflowed memory mid-export.
     49 frames cuts per-clip memory to ~140MB so a 15-scene movie fits.
     Constraint: (length - 1) %% 4 == 0, so valid values are 49, 81, 121, 161.
+
+    Resolution defaults to 832×480 (Wan native low-res) — clips get upscaled
+    to 1080p at the final concat pass in do_export anyway, so we trade
+    invisible per-clip resolution for ~2.4× faster sampling on a busy GPU.
+    Sampler steps dropped 20→8 below; Wan 2.2 5B is the distilled variant
+    and stays coherent at 8 steps. Override either by passing width/height
+    or by editing the steps in the KSampler node below.
     """
     clean = (prompt or "")[:380].strip()
     return {
@@ -2064,7 +2102,7 @@ def _comfy_workflow_wan22_i2v(image_filename: str, prompt: str, seed: int,
                           "batch_size": 1, "start_image": ["4", 0]}},
         "8":  {"class_type": "KSampler",
                "inputs": {"model": ["1", 0], "seed": int(seed),
-                          "steps": 20, "cfg": 5.0,
+                          "steps": 8, "cfg": 5.0,
                           "sampler_name": "euler", "scheduler": "simple",
                           "denoise": 1.0,
                           "positive": ["5", 0], "negative": ["6", 0],
@@ -2515,14 +2553,29 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
                         vid_path = smooth_path
 
             # ── Step 3: Build TTS audio ──
+            # Use Edge Neural TTS (en-US-GuyNeural by default) instead of gTTS.
+            # gTTS routes through the Google Translate TTS endpoint and sounds
+            # like 2014-era robotic narration; Edge Neural is the same quality
+            # tier as Google Cloud Wavenet but free and keyless. The /speak
+            # endpoint already uses this; just bringing exports up to parity.
+            # Fall back to gTTS only if Edge fails (network / rate limit).
             audio_path = os.path.join(tmp, f"audio_{i}.mp3")
             tts_parts  = [f"{sc.get('title','')}. {sc.get('action','')}"]
             for line in sc.get("dialogue", []):
                 tts_parts.append(f"{line.get('speaker','')}: {line.get('line','')}")
             audio = None
             duration = min_dur
+            narration_text = " ".join(tts_parts).strip()
             try:
-                gTTS(" ".join(tts_parts), lang="en").save(audio_path)
+                _edge_tts_to_mp3(narration_text, "en-US-GuyNeural", audio_path)
+            except Exception:
+                # Edge service unreachable — degrade to gTTS so the export
+                # still ships with SOME audio rather than a silent video.
+                try:
+                    gTTS(narration_text, lang="en").save(audio_path)
+                except Exception:
+                    pass
+            try:
                 # Read duration via a lightweight ffmpeg probe instead of
                 # loading the full AudioFileClip. Loading the clip held the
                 # decoded mp3 in MoviePy's internal buffer for the rest of
