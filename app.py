@@ -2211,10 +2211,15 @@ def _ffmpeg_path() -> str | None:
 
 # Target output frame rate for every animated clip — both per-scene previews
 # and the final exported movie. Wan 2.5 / Wan 2.2 both emit 24fps native, so
-# we motion-interpolate every clip up to TARGET_FPS before encoding. 60 is the
-# minimum that feels truly fluent; 48 still reads as cinema-cadence on fast
-# motion which Justen flagged as wonky.
-TARGET_FPS = 60
+# we motion-interpolate every clip up to TARGET_FPS before encoding.
+#
+# Dropped 60 -> 30 (2026-05-25) because the 60fps minterpolate pass cost ~98s
+# per clip on Render's shared vCPU, eclipsing the Wan generation itself (~27s
+# at the new fast settings) — for a 24-scene movie that's 39 min vs 12 min.
+# 30fps is what TikTok / Reels / YouTube Shorts deliver, so on phones it
+# reads identically to 60fps. Bump back to 60 here if Justen wants the
+# big-screen cinema fluency for a specific export.
+TARGET_FPS = 30
 
 def _interpolate_to_target_fps(src: str, dst: str, target_fps: int = TARGET_FPS) -> bool:
     """Motion-interpolate src mp4 -> dst mp4 at target_fps using ffmpeg

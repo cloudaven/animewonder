@@ -56,6 +56,72 @@ def make_story(title, scene_count):
     return {"title": title, "scenes": scenes, "characters": []}
 
 
+def make_story_with_dialogue(title, scene_count):
+    """Story with named M+F characters and dialogue lines — exercises the
+    multi-voice export path (per-speaker Edge Neural rendering + ffmpeg concat).
+    """
+    characters = [
+        {"name": "Jin",   "role": "Protagonist",
+         "gender": "m",
+         "character_anchor": "spiky black hair, glowing blue eyes, black hooded jacket, late teens",
+         "description": "Awakened shadow hunter, stoic, dry-witted"},
+        {"name": "Yua",   "role": "Supporting",
+         "gender": "f",
+         "character_anchor": "long silver braid, jade eyes, ceremonial white robe, mid-20s",
+         "description": "Mana healer who guides Jin through the gate"},
+    ]
+    settings = [
+        ("Crumbling stone archway at dusk",        "tense and silent"),
+        ("Underground crystal cavern glowing blue","luminous and ominous"),
+        ("Ruined throne hall with shattered glass","apocalyptic dread"),
+    ]
+    scenes = []
+    for i in range(scene_count):
+        setting, mood = settings[i % len(settings)]
+        scenes.append({
+            "title":   f"Scene {i+1}",
+            "setting": setting,
+            "mood":    mood,
+            "action":  (
+                "Jin steps forward through the dust. Yua's lantern flickers once, "
+                "then steadies. The gate breathes."
+            ),
+            "dialogue": [
+                {"speaker": "Jin", "line": "Something woke up down here. I can feel it.",
+                 "emotion": "cold"},
+                {"speaker": "Yua", "line": "Then we should not be the ones to greet it. Move quickly.",
+                 "emotion": "whispered"},
+                {"speaker": "Jin", "line": "Too late for that. Stay close.",
+                 "emotion": "neutral"},
+            ],
+            "image_prompt": (
+                f"anime hero and female mana healer in {setting}, cinematic lighting, "
+                "ultra detailed, Solo Leveling style, A-1 Pictures quality"
+            ),
+        })
+    return {"title": title, "scenes": scenes, "characters": characters}
+
+
+def download_and_save(s, base, job_id, out_dir):
+    """Pull the finished MP4 from /download/<job_id> and write it locally so
+    we can prove the file is real (size > 0, downloadable, plays)."""
+    try:
+        r = s.get(f"{base}/download/{job_id}", timeout=120, stream=True)
+        if r.status_code != 200:
+            return None, f"HTTP {r.status_code}"
+        os.makedirs(out_dir, exist_ok=True)
+        out_path = os.path.join(out_dir, f"{job_id}.mp4")
+        size = 0
+        with open(out_path, "wb") as fh:
+            for chunk in r.iter_content(chunk_size=65536):
+                if chunk:
+                    fh.write(chunk)
+                    size += len(chunk)
+        return out_path, size
+    except requests.RequestException as e:
+        return None, str(e)
+
+
 def login(base):
     s = requests.Session()
     r = s.post(f"{base}/login",
@@ -67,15 +133,15 @@ def login(base):
     return s
 
 
-def run_case(s, base, label, story, quality, animate=False, anim_model=None, timeout_s=900):
+def run_case(s, base, label, story, quality, animate=False, anim_model=None, timeout_s=900, style="solo_leveling"):
     print(f"\n=== {label} ===")
-    print(f"  scenes={len(story['scenes'])} quality={quality} animate={animate} anim_model={anim_model or '(default)'}")
+    print(f"  scenes={len(story['scenes'])} quality={quality} animate={animate} anim_model={anim_model or '(default)'} style={style}")
     payload = {
         "story":      story,
         "mode":       "episode",
         "quality":    quality,
         "animate":    animate,
-        "style":      "solo_leveling",
+        "style":      style,
     }
     if anim_model:
         payload["anim_model"] = anim_model
@@ -124,11 +190,21 @@ def run_case(s, base, label, story, quality, animate=False, anim_model=None, tim
         # mistake "asleep" for "OOM-killed".
         if status == "complete":
             elapsed = time.time() - t0
-            size_b = st.get("file_size") or 0
-            print(f"  [done] complete in {elapsed:.0f}s  file={st.get('file_name')}")
-            return {"label": label, "status": "complete", "elapsed": elapsed,
-                    "requested_q": quality, "server_q": server_q,
-                    "file_name": st.get("file_name"), "file_size": size_b}
+            print(f"  [done] complete in {elapsed:.0f}s  file={st.get('file_name')} — downloading…")
+            out_dir = os.path.join(os.path.expanduser("~"), "Desktop",
+                                   "AnimeWonder_Test_Exports")
+            out_path, size_or_err = download_and_save(s, base, job_id, out_dir)
+            if out_path:
+                print(f"  [pull] saved {out_path}  size={size_or_err/1024/1024:.2f} MB")
+                return {"label": label, "status": "complete", "elapsed": elapsed,
+                        "requested_q": quality, "server_q": server_q,
+                        "file_name": st.get("file_name"),
+                        "saved_to": out_path, "file_size": size_or_err}
+            else:
+                print(f"  [pull] FAILED to download: {size_or_err}")
+                return {"label": label, "status": "complete_no_download",
+                        "elapsed": elapsed, "requested_q": quality, "server_q": server_q,
+                        "msg": str(size_or_err)}
         if status == "error":
             elapsed = time.time() - t0
             print(f"  [done] ERROR after {elapsed:.0f}s: {msg}")
@@ -166,14 +242,30 @@ def main():
         ("smoke-2sc-4k-capped",make_story("Smoke 2sc 4k",        2), "4k",    False, None),
         ("real-5sc-1080p",     make_story("Real 5sc 1080p",      5), "1080p", False, None),
         ("real-5sc-4k-capped", make_story("Real 5sc 4k",         5), "4k",    False, None),
+        # End-to-end animated case: Wan 2.2 via comfy_local tunnel + per-speaker
+        # multi-voice TTS. 2 scenes with named M/F dialogue exercises both
+        # voice pools and the ffmpeg per-segment audio concat.
+        ("animate-2sc-1080p",  make_story_with_dialogue("Animate 2sc 1080p", 2),
+                                                          "1080p", True, "comfy_local"),
+        # Photoreal art path: forces the CyberRealistic Pony pipeline on the
+        # local GPU instead of Pollinations 2D anime. Justen's reference for
+        # what he wants the output to look like (Heavy Metal cybergirl).
+        ("animate-photoreal-2sc-1080p", make_story_with_dialogue("Animate Photoreal 2sc", 2),
+                                                          "1080p", True, "comfy_local"),
     ]
+    # Style override for the photoreal-specific case (mutating in place is fine
+    # since these are tuples-of-7 we just unpack below).
+    style_for_label = {
+        "animate-photoreal-2sc-1080p": "photoreal",
+    }
     if args.only:
         want = set(x.strip() for x in args.only.split(","))
         cases = [c for c in cases if c[0] in want]
 
     results = []
     for label, story, q, animate, am in cases:
-        results.append(run_case(s, args.base, label, story, q, animate, am))
+        style = style_for_label.get(label, "solo_leveling")
+        results.append(run_case(s, args.base, label, story, q, animate, am, style=style))
 
     print("\n" + "=" * 78)
     print(f"{'CASE':<25} {'STATUS':<10} {'REQ':<6} {'GOT':<6} {'TIME':>7}  FILE")
