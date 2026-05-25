@@ -19,3 +19,10 @@ _test*.png
 # OS
 .DS_Store
 Thumbs.db
+
+# Editor configs (per-developer, not project)
+.claude/
+
+# Runtime caches — regenerated per session, never check in
+.export_ready/
+.scene_video_cache/
