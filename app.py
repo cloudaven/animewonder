@@ -981,10 +981,14 @@ def speak():
 # per speaker name via _voice_for_speaker so the same character keeps the same
 # voice across every scene of an export.
 EXPORT_NARRATOR_VOICE = "en-US-GuyNeural"
-# Male pool trimmed 2026-05-25 — Justen picked sample 1 (Guy) + sample 3
-# (Andrew) and dropped Christopher. Female pool kept at 3 until he weighs in.
-EXPORT_VOICES_MALE   = ["en-US-GuyNeural",   "en-US-AndrewNeural"]
-EXPORT_VOICES_FEMALE = ["en-US-JennyNeural", "en-US-AriaNeural", "en-US-EmmaNeural"]
+# Pool curated by Justen 2026-05-25 after listening to the 6 samples:
+#   male   = sample 1 (Guy) + sample 3 (Andrew) — kept narrator + modern lead
+#   female = sample 2 of the female trio (Aria) — soft / lyrical
+# All other voices dropped. Single female means every named female
+# character shares Aria's voice; widen the pool if scenes call for
+# >1 distinct female speaker.
+EXPORT_VOICES_MALE   = ["en-US-GuyNeural", "en-US-AndrewNeural"]
+EXPORT_VOICES_FEMALE = ["en-US-AriaNeural"]
 
 
 def _voice_for_speaker(name: str, gender_hint: str | None) -> str:
