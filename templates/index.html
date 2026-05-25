@@ -1716,7 +1716,11 @@
       // Pick the animation model based on tier. Monarch/Admin gets Kling Pro (premium),
       // Hunter gets Wan 2.5 (cheaper). The server tier-gates this too, but the UI
       // tries to be honest about what the user will actually get.
-      const animModel = exportAnimate ? 'comfy_local' : 'local';
+      // CogVideoX-5B Q4 default for admin tier (better motion quality than
+      // Wan 2.2 5B at the cost of ~3-4x GPU time). Server tier-gates this:
+      // hunter/monarch silently downgrade to comfy_local (Wan) since
+      // CogVideoX would tie up Justen's single GPU for hours per export.
+      const animModel = exportAnimate ? 'comfy_cogvideox' : 'local';
       const res=await fetch('/start-export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({story,mode,quality:exportQuality,animate:exportAnimate,style:selectedStyle,anim_model:animModel,orientation:exportOrient})});
       const d=await res.json();
       if(!res.ok) throw new Error(d.error||'Export failed');
