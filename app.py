@@ -975,6 +975,60 @@ def speak():
         return jsonify({"error": str(e)}), 500
 
 
+# ── Edge Neural voice pools for export ────────────────────────────────────────
+# 3 male + 3 female voices, all en-US Edge Neural (free, keyless, streamed
+# from Microsoft's TTS service — nothing to install locally). Stable assignment
+# per speaker name via _voice_for_speaker so the same character keeps the same
+# voice across every scene of an export.
+EXPORT_NARRATOR_VOICE = "en-US-GuyNeural"
+EXPORT_VOICES_MALE   = ["en-US-GuyNeural", "en-US-ChristopherNeural", "en-US-DavisNeural"]
+EXPORT_VOICES_FEMALE = ["en-US-JennyNeural", "en-US-AriaNeural",     "en-US-SaraNeural"]
+
+
+def _voice_for_speaker(name: str, gender_hint: str | None) -> str:
+    """Pick a stable voice for `name`. Honors `gender_hint` ("m"/"f") when
+    Claude tagged the character; otherwise rotates through the combined pool
+    by name hash so the same speaker still gets the same voice across scenes."""
+    name = (name or "").strip()
+    if not name:
+        return EXPORT_NARRATOR_VOICE
+    g = (gender_hint or "").strip().lower()[:1]
+    if g == "f":
+        pool = EXPORT_VOICES_FEMALE
+    elif g == "m":
+        pool = EXPORT_VOICES_MALE
+    else:
+        pool = EXPORT_VOICES_MALE + EXPORT_VOICES_FEMALE
+    return pool[abs(hash(name.lower())) % len(pool)]
+
+
+def _concat_audio_files(parts: list, out_path: str, ffmpeg_bin: str) -> bool:
+    """ffmpeg concat-demuxer merge of multiple mp3 chunks into out_path.
+    Skips empty/missing inputs. Returns True on success."""
+    parts = [p for p in parts if p and os.path.exists(p) and os.path.getsize(p) > 0]
+    if not parts:
+        return False
+    if len(parts) == 1:
+        shutil.copyfile(parts[0], out_path)
+        return True
+    listfile = out_path + ".list.txt"
+    with open(listfile, "w", encoding="utf-8") as fh:
+        for p in parts:
+            esc = p.replace("\\", "/").replace("'", r"'\''")
+            fh.write(f"file '{esc}'\n")
+    try:
+        r = subprocess.run(
+            [ffmpeg_bin, "-y", "-f", "concat", "-safe", "0",
+             "-i", listfile, "-c", "copy", out_path],
+            capture_output=True, timeout=60)
+        return r.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0
+    except Exception:
+        return False
+    finally:
+        try: os.remove(listfile)
+        except OSError: pass
+
+
 def _edge_tts_to_mp3(text: str, voice: str, out_path: str) -> None:
     """Synchronous wrapper around edge_tts that writes an mp3 to out_path.
 
@@ -1092,6 +1146,7 @@ Return ONLY valid JSON — no markdown, no code fences:
     {{
       "name": "",
       "role": "Protagonist/Antagonist/Supporting",
+      "gender": "m or f (one letter; used to pick a male or female narration voice during export)",
       "description": "personality + arc in 1-2 sentences",
       "character_anchor": "fixed visual descriptor (see above)"
     }}
@@ -2405,11 +2460,14 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
         style_meta   = get_style(style_key)
         style_suffix = style_meta["image_suffix"]
         characters_by_name = {}
+        gender_by_speaker  = {}   # speaker name -> "m" / "f" (or "" when unknown)
         for c in (story.get("characters") or []):
             name = (c.get("name") or "").strip()
             anchor = (c.get("character_anchor") or "").strip()
             if name and anchor:
                 characters_by_name[name] = anchor
+            if name:
+                gender_by_speaker[name] = (c.get("gender") or "").strip().lower()[:1]
 
         # Target output dims. The 4K branch is what the user pays for.
         OUT_W, OUT_H = (3840, 2160) if quality == "4k" else (1920, 1080)
@@ -2553,26 +2611,55 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
                         vid_path = smooth_path
 
             # ── Step 3: Build TTS audio ──
-            # Use Edge Neural TTS (en-US-GuyNeural by default) instead of gTTS.
-            # gTTS routes through the Google Translate TTS endpoint and sounds
-            # like 2014-era robotic narration; Edge Neural is the same quality
-            # tier as Google Cloud Wavenet but free and keyless. The /speak
-            # endpoint already uses this; just bringing exports up to parity.
-            # Fall back to gTTS only if Edge fails (network / rate limit).
+            # Multi-voice narration: title + action go through the narrator
+            # voice; each dialogue line is rendered in the speaker's assigned
+            # voice (3-male/3-female Edge Neural pool, stable by speaker name).
+            # Per-segment mp3s are concatenated with ffmpeg's concat demuxer
+            # so the per-line stream-copy is essentially free. Falls back to a
+            # single gTTS pass if every Edge call fails (silent export still
+            # beats no export).
             audio_path = os.path.join(tmp, f"audio_{i}.mp3")
-            tts_parts  = [f"{sc.get('title','')}. {sc.get('action','')}"]
-            for line in sc.get("dialogue", []):
-                tts_parts.append(f"{line.get('speaker','')}: {line.get('line','')}")
+            seg_paths = []
+            narration_head = f"{sc.get('title','')}. {sc.get('action','')}".strip(". ").strip()
             audio = None
             duration = min_dur
-            narration_text = " ".join(tts_parts).strip()
-            try:
-                _edge_tts_to_mp3(narration_text, "en-US-GuyNeural", audio_path)
-            except Exception:
-                # Edge service unreachable — degrade to gTTS so the export
-                # still ships with SOME audio rather than a silent video.
+            ffmpeg_bin = _get_ffmpeg()
+
+            def _tts_segment(text, voice, idx):
+                if not text:
+                    return None
+                p = os.path.join(tmp, f"audio_{i}_{idx:02d}.mp3")
                 try:
-                    gTTS(narration_text, lang="en").save(audio_path)
+                    _edge_tts_to_mp3(text, voice, p)
+                    return p
+                except Exception:
+                    return None
+
+            if narration_head:
+                seg = _tts_segment(narration_head, EXPORT_NARRATOR_VOICE, 0)
+                if seg: seg_paths.append(seg)
+            for di, line in enumerate(sc.get("dialogue", []), start=1):
+                speaker = (line.get("speaker") or "").strip()
+                spoken  = (line.get("line") or "").strip()
+                if not spoken:
+                    continue
+                voice = _voice_for_speaker(speaker, gender_by_speaker.get(speaker))
+                seg = _tts_segment(spoken, voice, di)
+                if seg: seg_paths.append(seg)
+
+            full_text = " ".join(
+                [narration_head] +
+                [f"{(d.get('speaker') or '').strip()}: {(d.get('line') or '').strip()}"
+                 for d in sc.get("dialogue", [])]
+            ).strip()
+
+            if seg_paths and _concat_audio_files(seg_paths, audio_path, ffmpeg_bin):
+                pass  # multi-voice audio assembled
+            else:
+                # Every Edge call failed (or concat broke) — degrade to a
+                # single gTTS pass so the scene still ships with SOME audio.
+                try:
+                    gTTS(full_text or " ", lang="en").save(audio_path)
                 except Exception:
                     pass
             try:
