@@ -252,11 +252,16 @@ def main():
         # what he wants the output to look like (Heavy Metal cybergirl).
         ("animate-photoreal-2sc-1080p", make_story_with_dialogue("Animate Photoreal 2sc", 2),
                                                           "1080p", True, "comfy_local"),
+        # Xianxia / 3D cinematic dark-fantasy: routes through the photoreal
+        # pipeline (CyberRealistic Pony) since the target look is Unreal-grade
+        # CGI, not 2D anime. Per Justen's shadow-priestess reference shot.
+        ("animate-xianxia-2sc-1080p",  make_story_with_dialogue("Animate Xianxia 2sc", 2),
+                                                          "1080p", True, "comfy_local"),
     ]
-    # Style override for the photoreal-specific case (mutating in place is fine
-    # since these are tuples-of-7 we just unpack below).
+    # Style override for cases that need a specific visual mode.
     style_for_label = {
         "animate-photoreal-2sc-1080p": "photoreal",
+        "animate-xianxia-2sc-1080p":   "xianxia",
     }
     if args.only:
         want = set(x.strip() for x in args.only.split(","))

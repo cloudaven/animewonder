@@ -3,6 +3,11 @@ Anime style packs. Each pack supplies:
   - image_suffix : appended to every scene image prompt (for Pollinations/Seedream)
   - vibe_hint    : passed to Claude so dialogue/action tone matches the style
   - badge        : 2-3 char label used in the UI
+  - pipeline     : "anime" (default — Illustrious XL hires + FaceDetailer)
+                   or "photoreal" (CyberRealistic Pony hires + Face+Hand
+                   Detailer) for 3D cinematic / live-action / xianxia looks.
+                   Determines which local ComfyUI base model the export uses
+                   so each style hits the right visual register.
 """
 
 STYLES = {
@@ -127,6 +132,7 @@ STYLES = {
     "xianxia": {
         "name": "Xianxia Cultivation",
         "badge": "XX",
+        "pipeline": "photoreal",  # 3D cinematic CGI target — CyberRealistic Pony
         "image_suffix": (
             "cinematic 3D xianxia cultivation render, ancient Chinese fantasy aesthetic, "
             "Unreal Engine 5 quality, ornate divine palace with floating jade pillars, "
@@ -147,6 +153,7 @@ STYLES = {
     "photoreal": {
         "name": "Photoreal Cinematic",
         "badge": "PR",
+        "pipeline": "photoreal",  # CyberRealistic Pony — same model as xianxia
         "image_suffix": (
             "score_9, score_8_up, score_7_up, source_realistic, "
             "photorealistic, hyperrealistic, ultra detailed, 8k, sharp focus, "

@@ -2685,28 +2685,26 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
             seed = run_seed + i * 17 + 3
 
             img_bytes = None
-            # PHOTOREAL path (admin + comfy_local): CyberRealistic Pony with
-            # HiRes + FaceDetailer. Justen called this output "great" 2026-05-22.
-            # Only kicks in when style_key=="photoreal" — the Pony score tags
-            # in the photoreal style suffix would muddy any other style pack.
-            if (style_key == "photoreal"
-                    and COMFY_LOCAL_URL and not _comfy_locked()):
-                job["message"] = f"Scene {i+1}/{n} — generating photoreal art on local GPU…"
-                img_bytes = _comfy_image_photoreal(raw_prompt, W, H, seed)
-                if img_bytes:
-                    job["message"] = f"Scene {i+1}/{n} — photoreal art ready ✓"
-            # ANIME HIRES path (admin + comfy_local + any non-photoreal style):
-            # Illustrious XL + 4x-UltraSharp + FaceDetailer. Same Noct.Co-tier
-            # treatment as the photoreal pipeline, just with the anime stack.
-            # Added 2026-05-25 after Justen showed reference shots and said the
-            # single-pass Pollinations art on every style "looked like crap".
-            # Falls through to Pollinations on any failure.
-            elif (style_key != "photoreal"
-                    and COMFY_LOCAL_URL and not _comfy_locked()):
-                job["message"] = f"Scene {i+1}/{n} — generating hires anime art on local GPU…"
-                img_bytes = _comfy_image_anime_hires(raw_prompt, W, H, seed)
-                if img_bytes:
-                    job["message"] = f"Scene {i+1}/{n} — hires anime art ready ✓"
+            # Pick the local GPU image pipeline based on the style's declared
+            # target look. Each STYLES entry can set pipeline="photoreal" to
+            # route through CyberRealistic Pony (for 3D cinematic / xianxia /
+            # live-action looks) — otherwise it falls into the anime stack
+            # (Illustrious XL). Both pipelines apply Hi-Res + FaceDetailer;
+            # they differ only in base model + sampler tuning. Falls through
+            # to Pollinations on any failure so a broken local GPU never
+            # blocks an export.
+            style_pipeline = style_meta.get("pipeline", "anime")
+            if (COMFY_LOCAL_URL and not _comfy_locked()):
+                if style_pipeline == "photoreal":
+                    job["message"] = f"Scene {i+1}/{n} — generating photoreal art on local GPU…"
+                    img_bytes = _comfy_image_photoreal(raw_prompt, W, H, seed)
+                    if img_bytes:
+                        job["message"] = f"Scene {i+1}/{n} — photoreal art ready ✓"
+                else:
+                    job["message"] = f"Scene {i+1}/{n} — generating hires anime art on local GPU…"
+                    img_bytes = _comfy_image_anime_hires(raw_prompt, W, H, seed)
+                    if img_bytes:
+                        job["message"] = f"Scene {i+1}/{n} — hires anime art ready ✓"
             if not img_bytes:
                 # Pollinations fallback — retry + model fallback (flux x2 -> turbo)
                 # so one slow Pollinations request can't stall the whole export.
