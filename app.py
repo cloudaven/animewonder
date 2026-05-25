@@ -2862,11 +2862,10 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
                 except Exception:
                     audio_dur = min_dur
                 duration = max(audio_dur + 3, min_dur)
-                # For the MoviePy video-scene path below we still need an
-                # AudioFileClip object so we can attach + fade audio. For
-                # the static (ffmpeg-direct) path we just need the path.
-                if vid_path:
-                    audio = AudioFileClip(audio_path)
+                # Both branches below are ffmpeg-direct now (MoviePy dropped
+                # 2026-05-25 after the 15-scene OOM). audio_path is passed as
+                # an ffmpeg input; we do not need an AudioFileClip object.
+                # Leaving this comment as a tombstone for the old import.
             except Exception:
                 pass
 
@@ -2941,14 +2940,6 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
                     # potentially pick up via the static-fallback branch.
                     err = (e.stderr or b"").decode("utf-8", "replace")[:200]
                     job["message"] = f"Scene {i+1}/{n} — ffmpeg encode failed: {err}"
-                # Release any AudioFileClip the (now-deleted) MoviePy path
-                # might have created earlier in this scene before we moved
-                # to the ffmpeg-direct flow. Belt + braces for older code
-                # paths that still produce an `audio` object.
-                if audio is not None:
-                    try: audio.close()
-                    except Exception: pass
-                    audio = None
                 import gc as _gc
                 _gc.collect()
             else:
