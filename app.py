@@ -1518,8 +1518,16 @@ def _comfy_workflow_anime_hires(prompt: str, neg: str, w: int, h: int, seed: int
                    "sam_mask_hint_use_negative": "False",
                    "drop_size": 10, "wildcard": "", "cycle": 1,
                }},
+        # Final downscale back to requested w×h. The Hi-Res Fix stage rendered
+        # at 1.5×; sending a 1.5× image back to Render's 512 Mi worker forces
+        # PIL to hold ~10 MB of buffers during the resize/thumbnail pass and
+        # OOM-kills the worker mid-export. Scaling in ComfyUI on the local GPU
+        # is free and keeps Render's memory profile flat.
+        "40": {"class_type": "ImageScale",
+               "inputs": {"image": ["32", 0], "upscale_method": "lanczos",
+                          "width": w, "height": h, "crop": "disabled"}},
         "7": {"class_type": "SaveImage",
-              "inputs": {"images": ["32", 0],
+              "inputs": {"images": ["40", 0],
                          "filename_prefix": "animeforge_anime_hires"}},
     }
 
@@ -1678,8 +1686,14 @@ def _comfy_workflow_photoreal(prompt: str, neg: str, w: int, h: int, seed: int) 
                    "sam_mask_hint_use_negative": "False",
                    "drop_size": 10, "wildcard": "", "cycle": 1,
                }},
+        # Final downscale back to requested w×h. Same OOM-prevention as the
+        # anime_hires path — Render's 512 Mi worker can't afford the PIL
+        # buffers needed to resize a 1.5× image down.
+        "40": {"class_type": "ImageScale",
+               "inputs": {"image": ["34", 0], "upscale_method": "lanczos",
+                          "width": w, "height": h, "crop": "disabled"}},
         "7": {"class_type": "SaveImage",
-              "inputs": {"images": ["34", 0],
+              "inputs": {"images": ["40", 0],
                          "filename_prefix": "animeforge_photoreal"}},
     }
 
