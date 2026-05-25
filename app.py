@@ -981,8 +981,10 @@ def speak():
 # per speaker name via _voice_for_speaker so the same character keeps the same
 # voice across every scene of an export.
 EXPORT_NARRATOR_VOICE = "en-US-GuyNeural"
-EXPORT_VOICES_MALE   = ["en-US-GuyNeural", "en-US-ChristopherNeural", "en-US-DavisNeural"]
-EXPORT_VOICES_FEMALE = ["en-US-JennyNeural", "en-US-AriaNeural",     "en-US-SaraNeural"]
+# Davis + Sara were retired by Microsoft (return "No audio was received");
+# replaced with Andrew + Emma which are the current modern equivalents.
+EXPORT_VOICES_MALE   = ["en-US-GuyNeural",   "en-US-ChristopherNeural", "en-US-AndrewNeural"]
+EXPORT_VOICES_FEMALE = ["en-US-JennyNeural", "en-US-AriaNeural",        "en-US-EmmaNeural"]
 
 
 def _voice_for_speaker(name: str, gender_hint: str | None) -> str:
