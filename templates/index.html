@@ -815,6 +815,16 @@
           <span class="eq-fps" id="eq-animate-fps">— · ready</span>
         </button>
       </div>
+      <div class="exp-quality-row" style="margin-top:8px">
+        <button class="eq-btn eq-orient active" data-o="landscape" onclick="setOrient(this)">
+          <span class="eq-icon">🖥️</span><span class="eq-name">16:9</span>
+          <span class="eq-fps">Horizontal · YouTube</span>
+        </button>
+        <button class="eq-btn eq-orient" data-o="vertical" onclick="setOrient(this)">
+          <span class="eq-icon">📱</span><span class="eq-name">9:16</span>
+          <span class="eq-fps">Vertical · Shorts / TikTok / Reels</span>
+        </button>
+      </div>
       <div class="exp-info-row">
         <span>📹 <span id="exp-scene-count-preview">0</span> scenes</span>
         <span>⏱ ~<span id="exp-time-est">—</span> min</span>
@@ -858,7 +868,7 @@
   // ── State ──────────────────────────────────────────────────────────────────
   let story=null, sceneIdx=0, mode='episode';
   let autoOn=false, autoTimer=null, dlTimers=[];
-  let exportJobId=null, exportSrc=null, exportQuality='1080p';
+  let exportJobId=null, exportSrc=null, exportQuality='1080p', exportOrient='landscape';
   let currentProjectId=null;
   let seasonBible=null, seasonId=null, generatedEps={};
   let libLoaded=false, libTab='stories';
@@ -917,6 +927,7 @@
     shonen_battle: { icon:'🗡️', sub:'Hero clash style', suffix:'classic shonen anime art style,Bones Studio Pierrot quality,vibrant color palette,dynamic action poses,speed lines,explosive energy attacks,4K kinetic', bg:['rgba(60,0,20,.85)','rgba(0,20,60,.85)','rgba(0,0,0,.95)'], glow:'rgba(80,180,255,.6)', accent:'#50b4ff', border:'rgba(80,180,255,.55)' },
     isekai:        { icon:'🏔️', sub:'Portal adventure style', suffix:'modern isekai anime art style,vibrant high-fantasy world,status-window UI overlays,guild halls and dungeons,magic-circle effects,bright fantasy palette,4K JRPG composition', bg:['rgba(20,0,60,.85)','rgba(0,40,40,.85)','rgba(0,0,0,.95)'], glow:'rgba(80,255,200,.55)', accent:'#50ffc8', border:'rgba(80,255,200,.55)' },
     castlevania:   { icon:'🩸', sub:'Gothic horror style', suffix:'Netflix Castlevania anime art style,Powerhouse Animation Studios quality,gothic horror aesthetic,medieval Wallachia setting,candlelit stone cathedrals,blood moon skies,baroque architecture,intricate Belmont whip detail,vampire lord regalia,alchemical glyphs,deep crimson and obsidian palette with gold accents,fluid hand-drawn combat animation feel,dynamic motion smears,dramatic chiaroscuro lighting,painterly backgrounds,4K cinematic dark fantasy composition', bg:['rgba(0,0,0,.97)','rgba(60,0,10,.88)','rgba(30,0,30,.92)'], glow:'rgba(220,40,40,.6)', accent:'#dc2828', border:'rgba(220,40,40,.6)' },
+    xianxia:       { icon:'🐉', sub:'Cultivation 3D style', suffix:'cinematic 3D xianxia cultivation render,ancient Chinese fantasy aesthetic,Unreal Engine 5 quality,ornate divine palace,floating jade pillars,celestial bridges over storm clouds,sweeping silk robes,glowing golden qi energy,volumetric god-rays,dragon-scale architecture,immortal sage atmosphere,massive scale,dramatic VFX explosion of radiant light,photoreal CGI faces,8K octane render,Chinese animated film grade composition', bg:['rgba(20,10,0,.92)','rgba(60,30,0,.88)','rgba(10,0,30,.9)'], glow:'rgba(255,200,80,.65)', accent:'#ffc850', border:'rgba(255,200,80,.6)' },
   };
 
   function applyTheme(key){
@@ -1638,10 +1649,15 @@
 
   function setQuality(btn){
     if(btn.classList.contains('eq-locked')){window.location.href='/upgrade';return;}
-    // quality buttons are mutually exclusive among themselves (not the animate toggle)
-    document.querySelectorAll('.eq-btn:not(#eq-animate-btn)').forEach(b=>b.classList.remove('active'));
+    // quality buttons are mutually exclusive among themselves (not animate, not orient)
+    document.querySelectorAll('.eq-btn:not(#eq-animate-btn):not(.eq-orient)').forEach(b=>b.classList.remove('active'));
     btn.classList.add('active'); exportQuality=btn.dataset.q;
     updateTimeEst();
+  }
+
+  function setOrient(btn){
+    document.querySelectorAll('.eq-orient').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active'); exportOrient=btn.dataset.o;
   }
 
   function toggleAnimate(btn){
@@ -1701,7 +1717,7 @@
       // Hunter gets Wan 2.5 (cheaper). The server tier-gates this too, but the UI
       // tries to be honest about what the user will actually get.
       const animModel = exportAnimate ? 'comfy_local' : 'local';
-      const res=await fetch('/start-export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({story,mode,quality:exportQuality,animate:exportAnimate,style:selectedStyle,anim_model:animModel})});
+      const res=await fetch('/start-export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({story,mode,quality:exportQuality,animate:exportAnimate,style:selectedStyle,anim_model:animModel,orientation:exportOrient})});
       const d=await res.json();
       if(!res.ok) throw new Error(d.error||'Export failed');
       exportJobId=d.job_id;

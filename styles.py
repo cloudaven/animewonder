@@ -124,6 +124,26 @@ STYLES = {
             "blood is a design element. Romantic gothic intensity. Long brooding monologues offset by sharp gallows humor."
         ),
     },
+    "xianxia": {
+        "name": "Xianxia Cultivation",
+        "badge": "XX",
+        "image_suffix": (
+            "cinematic 3D xianxia cultivation render, ancient Chinese fantasy aesthetic, "
+            "Unreal Engine 5 quality, ornate divine palace with floating jade pillars, "
+            "celestial bridges over storm clouds, sweeping silk robes, glowing golden qi energy, "
+            "volumetric god-rays, dragon-scale architecture, immortal sage atmosphere, "
+            "massive scale, dramatic VFX explosion of pure radiant light, "
+            "photoreal CGI faces, cinematic key art, ultra-detailed, 8K, octane render, "
+            "Vervo Entertainment style, Chinese animated film grade composition"
+        ),
+        "vibe_hint": (
+            "Cultivation / xianxia / wuxia. Dao sages, sect elders, qi awakening, "
+            "100,000-year sleep transformations, divine palaces, immortal tribulations. "
+            "Grand cosmic stakes, ancient honorifics, sect hierarchies, breakthrough moments "
+            "framed as explosive celestial light. Tone is reverent, mythic, and slightly "
+            "over-the-top in scale — think Chinese cultivation web-novel narration."
+        ),
+    },
     "photoreal": {
         "name": "Photoreal Cinematic",
         "badge": "PR",

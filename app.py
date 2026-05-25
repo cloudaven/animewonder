@@ -2348,7 +2348,7 @@ def animate_scene_comfy(img_path, prompt, tmp_dir, scene_idx, job, length: int =
         return None
 
 
-def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEFAULT_STYLE, anim_model="wan"):
+def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEFAULT_STYLE, anim_model="wan", orientation="landscape"):
     job = export_jobs[job_id]
     job["start_time"] = time.time()
     tmp = tempfile.mkdtemp(prefix="animeforge_")
@@ -2386,6 +2386,14 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
             W, H = 1920, 1080
         else:
             W, H = 1280, 720
+        # Vertical 9:16 (shorts / reels / TikTok). Swap so OUT_W < OUT_H and
+        # per-scene dims also flip — Pollinations + the photoreal pipeline
+        # both accept arbitrary W×H, and ffmpeg's force_original_aspect_ratio
+        # pad chain works for either orientation. Final container is the
+        # canonical vertical resolution at the target quality.
+        if orientation == "vertical":
+            OUT_W, OUT_H = OUT_H, OUT_W
+            W, H = H, W
         job["scenes_total"] = n
         # Use a stable per-export seed so re-runs of the same story produce the same characters
         run_seed = abs(hash((story.get("title",""), style_key))) % 100000
@@ -2933,6 +2941,11 @@ def start_export():
     style_key  = (data.get("style") or DEFAULT_STYLE).strip()
     if style_key not in STYLES:
         style_key = DEFAULT_STYLE
+    # Orientation: "landscape" (16:9) default, "vertical" (9:16) for shorts/reels.
+    # Unrecognized values silently fall back to landscape.
+    orientation = (data.get("orientation") or "landscape").strip().lower()
+    if orientation not in ("landscape", "vertical"):
+        orientation = "landscape"
     # Animation model selection. Post fal.ai removal (2026-05-24) the only
     # backends are local Justen-PC GPUs:
     #   "local"            -> FFmpeg cinematic zoompan (Ken Burns, no GPU)
@@ -2997,14 +3010,16 @@ def start_export():
         "scenes_done": 0, "eta_seconds": None, "elapsed_seconds": 0,
         "current_img_b64": None, "current_scene_title": "", "quality": quality,
         "animate": animate, "style": style_key, "anim_model": anim_model,
+        "orientation": orientation,
     }
     threading.Thread(
         target=do_export,
-        args=(job_id, story, mode, quality, animate, style_key, anim_model),
+        args=(job_id, story, mode, quality, animate, style_key, anim_model, orientation),
         daemon=True,
     ).start()
     return jsonify({"job_id": job_id, "quality": quality, "animate": animate,
-                    "style": style_key, "anim_model": anim_model})
+                    "style": style_key, "anim_model": anim_model,
+                    "orientation": orientation})
 
 
 @app.route("/export-status/<job_id>")
