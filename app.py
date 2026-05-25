@@ -2023,7 +2023,7 @@ def scene_video_file(key):
 
 # ── Video export ───────────────────────────────────────────────────────────────
 
-MIN_DUR = {"episode":15,"short":30,"movie":90}
+MIN_DUR = {"episode":15,"short":60,"movie":90}  # short bumped 30->60 2026-05-25; UI promises ~15 min, 15 scenes × 60 sec = 15 min
 ANIM_CLIP_DUR = 5   # seconds per scene clip
 
 # Wan 2.5 native output resolution. fal.ai prices it tiered:
@@ -2280,22 +2280,22 @@ _WAN22_NEGATIVE_PROMPT = (
 )
 
 def _comfy_workflow_wan22_i2v(image_filename: str, prompt: str, seed: int,
-                              width: int = 832, height: int = 480,
-                              length: int = 49) -> dict:
+                              width: int = 1280, height: int = 720,
+                              length: int = 121) -> dict:
     """Build the API-format graph ComfyUI's /prompt endpoint expects.
 
-    length=49 frames at 24fps ≈ 2 sec clips. We used to do 121 (5 sec) but
-    that crashed Render's 512MB free-tier worker: MoviePy holds each clip's
-    frames in RAM and 3 × 5-sec × 720p clips overflowed memory mid-export.
-    49 frames cuts per-clip memory to ~140MB so a 15-scene movie fits.
-    Constraint: (length - 1) %% 4 == 0, so valid values are 49, 81, 121, 161.
+    length=121 frames at 24fps ≈ 5 sec clips (2026-05-25). Lower lengths
+    (49 = 2 sec) made each scene loop the same 2 sec of motion 15 times
+    per scene since per-scene duration is min 30-60 sec. 121 cuts loops
+    to ~6-12 per scene and each loop is a meaningful beat.
+    Constraint: (length - 1) %% 4 == 0, so valid 49, 81, 121, 161.
 
-    Resolution defaults to 832×480 (Wan native low-res) — clips get upscaled
-    to 1080p at the final concat pass in do_export anyway, so we trade
-    invisible per-clip resolution for ~2.4× faster sampling on a busy GPU.
-    Sampler steps dropped 20→8 below; Wan 2.2 5B is the distilled variant
-    and stays coherent at 8 steps. Override either by passing width/height
-    or by editing the steps in the KSampler node below.
+    Resolution 1280×720 (Wan documented native) and steps 16 (cfg_step_lora's
+    design target — 'distilled but full'). Earlier defaults of 832×480 + 8
+    steps were a temporary speed/quality trade Justen rolled back after
+    seeing the output called the result "garbage." Cost is ~2.5× per-clip
+    GPU time; trade is real motion quality + sharp character detail vs
+    blocky low-res twitch.
     """
     clean = (prompt or "")[:380].strip()
     return {
@@ -2321,7 +2321,7 @@ def _comfy_workflow_wan22_i2v(image_filename: str, prompt: str, seed: int,
                           "batch_size": 1, "start_image": ["4", 0]}},
         "8":  {"class_type": "KSampler",
                "inputs": {"model": ["1", 0], "seed": int(seed),
-                          "steps": 8, "cfg": 5.0,
+                          "steps": 16, "cfg": 5.0,
                           "sampler_name": "euler", "scheduler": "simple",
                           "denoise": 1.0,
                           "positive": ["5", 0], "negative": ["6", 0],
