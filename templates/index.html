@@ -864,24 +864,16 @@
   let libLoaded=false, libTab='stories';
   const CAN_4K = {{ 'true' if tier in ('monarch','admin') else 'false' }};
   const CAN_PREMIUM_ANIM = {{ 'true' if tier in ('monarch','admin') else 'false' }};
-  // Capability signals from the server so the UI can describe the actual
-  // backend that will fire instead of advertising a model the user can't
-  // reach. fal_ok=FAL_KEY present; comfy_local_ok=home GPU tunnel URL set.
-  const FAL_OK = {{ 'true' if fal_ok else 'false' }};
+  // Capability signal from the server: home GPU tunnel URL set.
   const COMFY_LOCAL_OK = {{ 'true' if comfy_local_ok else 'false' }};
   // Live in-viewer motion (real Wan 2.2 clips, not Ken Burns) is admin-only —
   // it spends Justen's home-GPU electricity and serializes through one card.
   // Paying users keep getting static images here; their motion ships in exports.
   const CAN_LIVE_MOTION = {{ 'true' if is_admin else 'false' }};
   // Animation backend label — what the user actually gets when they hit ANIMATE.
-  // Admin+tunnel  -> Local GPU (Wan 2.2 5B); FAL_KEY present -> cloud Wan 2.5;
-  // otherwise the toggle still works but only produces Ken-Burns static motion.
-  const ANIM_BACKEND_LABEL = ({{ 'true' if is_admin else 'false' }} && COMFY_LOCAL_OK)
-    ? 'Local GPU (Wan 2.2 5B)'
-    : (FAL_OK ? 'Wan 2.5' : 'Static motion');
-  const ANIM_BACKEND_OFF_LABEL = ({{ 'true' if is_admin else 'false' }} && COMFY_LOCAL_OK)
-    ? 'Local GPU · ready'
-    : (FAL_OK ? 'Wan 2.5 · ready' : 'No backend · static panels only');
+  // Tunnel up -> Local GPU (Wan 2.2 5B); otherwise Ken-Burns static motion.
+  const ANIM_BACKEND_LABEL = COMFY_LOCAL_OK ? 'Local GPU (Wan 2.2 5B)' : 'Static motion';
+  const ANIM_BACKEND_OFF_LABEL = COMFY_LOCAL_OK ? 'Local GPU · ready' : 'No backend · static panels only';
   // Per-scene-index state for the live-motion pipeline. Avoids re-POSTing
   // /scene-video/start on every loadScene call when the user navigates back.
   // Shape: { [sceneIdx]: { key, status, url, pollTimer, generation } }
@@ -1708,7 +1700,7 @@
       // Pick the animation model based on tier. Monarch/Admin gets Kling Pro (premium),
       // Hunter gets Wan 2.5 (cheaper). The server tier-gates this too, but the UI
       // tries to be honest about what the user will actually get.
-      const animModel = exportAnimate ? (CAN_PREMIUM_ANIM ? 'kling' : 'wan') : 'local';
+      const animModel = exportAnimate ? 'comfy_local' : 'local';
       const res=await fetch('/start-export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({story,mode,quality:exportQuality,animate:exportAnimate,style:selectedStyle,anim_model:animModel})});
       const d=await res.json();
       if(!res.ok) throw new Error(d.error||'Export failed');

@@ -81,11 +81,10 @@ PACKS = {
     "monarch": {"credits": PACK_MONARCH_CREDITS, "price": PACK_MONARCH_PRICE, "tier": "monarch"},
 }
 
-# fal.ai dropped 2026-05-24 — Justen's balance kept going to 0 and the
-# whole pipeline routinely returned "fal.ai balance exhausted" errors
-# every export. Local-GPU paths (Wan 2.2 5B, CogVideoX, LongCat-Video)
-# are free for admin and the default for paying tiers now. The FAL_KEY
-# env var on Render can be deleted — it's no longer read.
+# fal.ai dropped 2026-05-24 — balance kept hitting 0 and the pipeline
+# routinely failed with "balance exhausted" errors every export. All
+# animation now runs on Justen's home GPU (Wan 2.2 5B, CogVideoX,
+# LongCat-Video). Free for admin, default for paying tiers.
 
 # LongCat-Video local backend (Meituan, 13.6B). Same tunnel pattern as
 # COMFY_LOCAL_URL but points at a separate HTTP server on Justen's PC
@@ -1099,7 +1098,6 @@ def index():
                            email=session.get("email",""),
                            tier=tier, used=used, limit=limit,
                            paypal_client_id=PAYPAL_CLIENT_ID,
-                           fal_ok=False,  # fal.ai removed 2026-05-24; kept for template back-compat
                            comfy_local_ok=bool(COMFY_LOCAL_URL),
                            longcat_local_ok=bool(LONGCAT_LOCAL_URL))
 
@@ -3116,7 +3114,6 @@ def admin_panel():
                            stats=stats,
                            pp_ok=pp_ok,
                            pp_mode=PAYPAL_MODE,
-                           fal_ok=False,  # fal.ai removed 2026-05-24; kept for template back-compat
                            comfy_local_ok=bool(COMFY_LOCAL_URL),
                            longcat_local_ok=bool(LONGCAT_LOCAL_URL),
                            email=session.get("email", ""))

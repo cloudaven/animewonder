@@ -201,41 +201,42 @@
     </div>
   </div><!-- /store-card -->
 
-  <!-- Kling Animation Status -->
+  <!-- Local GPU Animation Status -->
   <div class="store-card" style="margin-top:14px">
     <div class="store-header">
-      <div class="store-title">// Kling Animation (fal.ai)</div>
-      {% if fal_ok %}
-        <span class="store-badge badge-live">CONFIGURED ✓</span>
+      <div class="store-title">// Local GPU Animation (RTX 4070 Ti SUPER)</div>
+      {% if comfy_local_ok %}
+        <span class="store-badge badge-live">TUNNEL LIVE ✓</span>
       {% else %}
-        <span class="store-badge badge-uncfg">NOT CONFIGURED</span>
+        <span class="store-badge badge-uncfg">TUNNEL DOWN</span>
       {% endif %}
     </div>
     <div class="store-grid">
       <div class="store-field">
-        <div class="sf-lbl">API Key</div>
-        <div class="sf-val {% if fal_ok %}ok{% else %}missing{% endif %}">
-          {% if fal_ok %}Set ✓{% else %}Missing ✗{% endif %}
+        <div class="sf-lbl">Wan 2.2 5B (ComfyUI)</div>
+        <div class="sf-val {% if comfy_local_ok %}ok{% else %}missing{% endif %}">
+          {% if comfy_local_ok %}Online ✓{% else %}Offline ✗{% endif %}
         </div>
       </div>
       <div class="store-field">
-        <div class="sf-lbl">Clip Duration</div>
-        <div class="sf-val ok">4 sec / scene</div>
+        <div class="sf-lbl">LongCat-Video 13.6B</div>
+        <div class="sf-val {% if longcat_local_ok %}ok{% else %}missing{% endif %}">
+          {% if longcat_local_ok %}Online ✓{% else %}Offline ✗{% endif %}
+        </div>
       </div>
       <div class="store-field">
-        <div class="sf-lbl">Frame Rate</div>
-        <div class="sf-val ok">24 fps</div>
+        <div class="sf-lbl">Per-Scene Time</div>
+        <div class="sf-val ok">~2 min (Wan) · ~36 min (LongCat)</div>
       </div>
       <div class="store-field">
-        <div class="sf-lbl">Resolution</div>
-        <div class="sf-val ok">1080p</div>
+        <div class="sf-lbl">Cost</div>
+        <div class="sf-val ok">$0 (your hardware)</div>
       </div>
     </div>
-    {% if not fal_ok %}
+    {% if not comfy_local_ok %}
     <div class="env-hint">
-      Animation runs <strong>free on your RTX 4070 Ti SUPER</strong> (no API key needed).<br>
-      Hit <strong>ANIMATE</strong> in the export overlay — Wan 2.2 5B I2V runs locally via the ComfyUI tunnel.<br><br>
-      Optional: add <code>FAL_KEY=</code> to <code>.env</code> for cloud Wan 2.5 / Kling Pro animation (fal.ai — requires paid credits).
+      Tunnel is down. Run <code>C:\ai\start_anime_stack.bat</code> on Justen's PC to bring ComfyUI + LongCat back online.
+      Tunnel watcher auto-syncs the new URL to Render env vars.
     </div>
     {% endif %}
   </div>

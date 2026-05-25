@@ -38,8 +38,6 @@ services:
         sync: false
       - key: SECRET_KEY
         sync: false
-      - key: FAL_KEY
-        sync: false
       - key: PAYPAL_CLIENT_ID
         sync: false
       - key: PAYPAL_SECRET
