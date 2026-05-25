@@ -99,6 +99,7 @@ def run_case(s, base, label, story, quality, animate=False, anim_model=None, tim
 
     last_msg = ""
     not_found_streak = 0
+    saw_progress = False  # once we've seen ANY non-not_found, treat fresh not_found as OOM
     while time.time() - t0 < timeout_s:
         try:
             r = s.get(f"{base}/export-status/{job_id}", timeout=30)
@@ -116,29 +117,34 @@ def run_case(s, base, label, story, quality, animate=False, anim_model=None, tim
         if msg != last_msg:
             print(f"  [{int(time.time()-t0):4d}s] {status}: {msg}")
             last_msg = msg
+        # Server's terminal states: "complete" = success, "error" = failure.
+        # "not_found" can mean: never started OR worker was OOM-killed mid-run
+        # OR (post-success) Render's free tier put the idle worker to sleep
+        # and wiped export_jobs. We MUST exit before the worker idles or we
+        # mistake "asleep" for "OOM-killed".
+        if status == "complete":
+            elapsed = time.time() - t0
+            size_b = st.get("file_size") or 0
+            print(f"  [done] complete in {elapsed:.0f}s  file={st.get('file_name')}")
+            return {"label": label, "status": "complete", "elapsed": elapsed,
+                    "requested_q": quality, "server_q": server_q,
+                    "file_name": st.get("file_name"), "file_size": size_b}
+        if status == "error":
+            elapsed = time.time() - t0
+            print(f"  [done] ERROR after {elapsed:.0f}s: {msg}")
+            return {"label": label, "status": "error", "elapsed": elapsed,
+                    "requested_q": quality, "server_q": server_q, "msg": msg}
         if status == "not_found":
             not_found_streak += 1
-            # OOM kills the worker, job dict is wiped after gunicorn restart.
-            # 3 consecutive not_found = worker died.
-            if not_found_streak >= 3:
+            if saw_progress and not_found_streak >= 3:
+                # Saw running state, now job is gone — worker died mid-export.
                 elapsed = time.time() - t0
-                print(f"  [done] OOM (worker restarted, job lost) after {elapsed:.0f}s")
+                print(f"  [done] OOM (worker restarted mid-run, job lost) after {elapsed:.0f}s")
                 return {"label": label, "status": "oom", "elapsed": elapsed,
                         "requested_q": quality, "server_q": server_q}
         else:
             not_found_streak = 0
-        if status == "done":
-            elapsed = time.time() - t0
-            size_b = st.get("file_size") or 0
-            print(f"  [done] {elapsed:.0f}s  file={st.get('file_name')}  size={size_b/1024/1024:.2f}MB")
-            return {"label": label, "status": "done", "elapsed": elapsed,
-                    "requested_q": quality, "server_q": server_q,
-                    "file_name": st.get("file_name"), "file_size": size_b}
-        if status == "failed":
-            elapsed = time.time() - t0
-            print(f"  [done] FAILED after {elapsed:.0f}s: {msg}")
-            return {"label": label, "status": "failed", "elapsed": elapsed,
-                    "requested_q": quality, "server_q": server_q, "msg": msg}
+            saw_progress = True
         time.sleep(2)
     print(f"  [done] TIMEOUT after {timeout_s}s")
     return {"label": label, "status": "timeout", "elapsed": timeout_s}
