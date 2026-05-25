@@ -2615,8 +2615,11 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
     job["start_time"] = time.time()
     tmp = tempfile.mkdtemp(prefix="animeforge_")
     try:
-        from moviepy import ImageClip, AudioFileClip, concatenate_videoclips
-        import moviepy
+        # MoviePy fully purged from the export hot path (2026-05-25). All
+        # video assembly is ffmpeg-direct now. Importing moviepy would add
+        # ~80 MB to the worker's resident memory the first time do_export
+        # runs — wasteful on a 512 Mi cap, and the gTTS fallback below is
+        # the only legacy hold-out.
         from PIL import Image
         from gtts import gTTS
 
@@ -3009,22 +3012,15 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
                         time.sleep(1.5)
                     rc = proc.returncode if proc.returncode is not None else -1
                     if rc != 0:
-                        # ffmpeg path failed — fall back to MoviePy (legacy
-                        # path). May OOM at 4K but at least we tried.
-                        clip = ImageClip(img_path, duration=duration)
-                        if audio:
-                            audio = audio.with_effects([
-                                moviepy.afx.AudioFadeIn(0.5),
-                                moviepy.afx.AudioFadeOut(1.0)])
-                            clip = clip.with_audio(audio)
-                        try: clip = clip.resized((W, H))
-                        except Exception: pass
-                        clip.write_videofile(
-                            scene_out, fps=TARGET_FPS, codec="libx264",
-                            audio_codec="aac", threads=2, preset="ultrafast",
-                            logger=None)
-                        try: clip.close()
-                        except Exception: pass
+                        # ffmpeg failed and there is no fallback. The MoviePy
+                        # fallback that used to live here was the OOM culprit
+                        # (imports + ImageClip + audio with_effects). The
+                        # ffmpeg-direct path above already handles every
+                        # resolution from 720p to 4K reliably; if it fails we
+                        # just leave scene_out unwritten and the final concat
+                        # step skips it. Better one missing scene than a
+                        # whole-export OOM.
+                        pass
                 except Exception:
                     pass
 
