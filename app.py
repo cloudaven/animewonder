@@ -2896,18 +2896,17 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
             ffmpeg_bin = _get_ffmpeg()
             if vid_path:
                 # ffmpeg-direct path. The previous MoviePy implementation
-                # (VideoFileClip + AudioFileClip + .with_audio + .resized +
-                # write_videofile) leaked C-level ffmpeg readers and decoded
-                # mp3 buffers per scene — ~5 MB/scene that GC didn't reclaim
-                # without explicit close() on every intermediate clip. Over
-                # 15 scenes that pushed the 512 Mi worker past OOM. ffmpeg
-                # subprocess inherits no state across scenes and frees
-                # everything on process exit.
-                # Filter: scale + pad so Wan's 1280×720 (or whatever) gets
-                # letterboxed to exact W×H. Audio is mapped from the second
-                # input when available; otherwise we synthesize silent
-                # stereo so every scene MP4 has the same v+a layout for the
-                # final concat-demuxer.
+                # leaked C-level ffmpeg readers per scene; ffmpeg subprocess
+                # inherits no state and frees everything on exit.
+                #
+                # Duration: the Wan clip is ~2 sec (49 frames @ 24fps) but
+                # each scene needs to be `duration` long (audio_dur + 3 or
+                # min_dur, whichever is larger). We loop the Wan video with
+                # -stream_loop -1, pad the audio with silence via apad,
+                # then -t cuts both streams at exactly `duration`. Without
+                # this the 2-sec video + audio_path through `-shortest`
+                # truncated every scene to 2 sec (Justen's 15-scene Short
+                # Film came out 30 sec instead of 7+ min).
                 vf = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
                       f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p,"
                       f"fps={TARGET_FPS}")
@@ -2917,21 +2916,23 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
                              and os.path.getsize(audio_path) > 0)
                 cmd = [*ff_prefix, ffmpeg_bin, "-y", "-loglevel", "error",
                        "-threads", "1",
-                       "-i", vid_path]
+                       "-stream_loop", "-1", "-i", vid_path]
                 if has_audio:
+                    # apad pads the audio with silence past its natural end
+                    # so -t can cut at `duration` without truncating any
+                    # narration. afade ramps the tail to silence smoothly.
                     cmd.extend(["-i", audio_path,
                                 "-map", "0:v:0", "-map", "1:a:0",
-                                "-c:a", "aac", "-b:a", "128k",
-                                "-shortest"])
+                                "-af", "apad,afade=t=out:st="
+                                       f"{max(0, duration - 1):.2f}:d=1",
+                                "-c:a", "aac", "-b:a", "128k"])
                 else:
-                    # anullsrc generates silent stereo aac so every scene
-                    # MP4 carries a v+a layout the concat-demuxer accepts.
                     cmd.extend(["-f", "lavfi", "-i",
                                 "anullsrc=channel_layout=stereo:sample_rate=44100",
                                 "-map", "0:v:0", "-map", "1:a:0",
-                                "-c:a", "aac", "-b:a", "128k",
-                                "-shortest"])
-                cmd.extend(["-vf", vf, "-c:v", "libx264",
+                                "-c:a", "aac", "-b:a", "128k"])
+                cmd.extend(["-t", f"{duration:.2f}",
+                            "-vf", vf, "-c:v", "libx264",
                             "-preset", "ultrafast", "-crf", "23",
                             "-pix_fmt", "yuv420p",
                             scene_out])
