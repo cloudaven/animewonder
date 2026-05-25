@@ -1438,6 +1438,150 @@ def _comfy_image(prompt: str, w: int, h: int, seed: int) -> bytes | None:
         return None
 
 
+def _comfy_workflow_anime_hires(prompt: str, neg: str, w: int, h: int, seed: int) -> dict:
+    """Noct.Co-tier anime workflow: Illustrious XL + Hi-Res Fix + FaceDetailer.
+
+    Mirrors the photoreal pipeline's structure but swaps in the anime stack:
+      - Illustrious-XL-v1.0 instead of CyberRealistic Pony
+      - 4x-UltraSharp upscaler (sharper line art) instead of NMKD-Siax (skin)
+      - No HandDetailer (stylized anime hands forgive much more than realism)
+    Stages:
+      1. Base render @ w×h, 30 steps, euler/normal, CFG 5
+      2. Hi-Res Fix: 4x-UltraSharp → downscale to 1.5x → 20-step refine @ denoise 0.4
+      3. FaceDetailer: YOLOv8m → per-face inpaint @ 640 guide, 20 steps, denoise 0.45
+
+    Built 2026-05-25 after Justen showed Noct.Co reference shots and said the
+    single-pass Pollinations art on ALL styles "looked like crap". This routes
+    every non-photoreal style through the same hires + facedetailer treatment
+    as the existing photoreal pipeline so every visual mode hits the same
+    quality bar.
+
+    Per-image time: ~30-50 sec on RTX 4070 Ti SUPER (vs ~5 sec Pollinations).
+    Output 1.5x the requested w×h after hires upscale, which the export
+    pipeline downsamples back to per-scene render size — net effect is
+    sharper detail at the same final resolution.
+    """
+    target_w = int(w * 1.5)
+    target_h = int(h * 1.5)
+    return {
+        "1": {"class_type": "CheckpointLoaderSimple",
+              "inputs": {"ckpt_name": "Illustrious-XL-v1.0.safetensors"}},
+        "2": {"class_type": "CLIPTextEncode",
+              "inputs": {"clip": ["1", 1], "text": prompt}},
+        "3": {"class_type": "CLIPTextEncode",
+              "inputs": {"clip": ["1", 1], "text": neg}},
+        "4": {"class_type": "EmptyLatentImage",
+              "inputs": {"width": w, "height": h, "batch_size": 1}},
+        "5": {"class_type": "KSampler",
+              "inputs": {"model": ["1", 0], "positive": ["2", 0],
+                         "negative": ["3", 0], "latent_image": ["4", 0],
+                         "seed": int(seed), "steps": 30, "cfg": 5.0,
+                         "sampler_name": "euler", "scheduler": "normal",
+                         "denoise": 1.0}},
+        "6": {"class_type": "VAEDecode",
+              "inputs": {"samples": ["5", 0], "vae": ["1", 2]}},
+        # Hi-Res Fix
+        "20": {"class_type": "UpscaleModelLoader",
+               "inputs": {"model_name": "4x-UltraSharp.pth"}},
+        "21": {"class_type": "ImageUpscaleWithModel",
+               "inputs": {"upscale_model": ["20", 0], "image": ["6", 0]}},
+        "22": {"class_type": "ImageScale",
+               "inputs": {"image": ["21", 0], "upscale_method": "lanczos",
+                          "width": target_w, "height": target_h, "crop": "disabled"}},
+        "23": {"class_type": "VAEEncode",
+               "inputs": {"pixels": ["22", 0], "vae": ["1", 2]}},
+        "24": {"class_type": "KSampler",
+               "inputs": {"model": ["1", 0], "positive": ["2", 0],
+                          "negative": ["3", 0], "latent_image": ["23", 0],
+                          "seed": int(seed) + 7777, "steps": 20, "cfg": 5.0,
+                          "sampler_name": "euler", "scheduler": "normal",
+                          "denoise": 0.4}},
+        "25": {"class_type": "VAEDecode",
+               "inputs": {"samples": ["24", 0], "vae": ["1", 2]}},
+        # FaceDetailer
+        "30": {"class_type": "UltralyticsDetectorProvider",
+               "inputs": {"model_name": "bbox/face_yolov8m.pt"}},
+        "32": {"class_type": "FaceDetailer",
+               "inputs": {
+                   "image": ["25", 0], "model": ["1", 0], "clip": ["1", 1],
+                   "vae": ["1", 2], "positive": ["2", 0], "negative": ["3", 0],
+                   "bbox_detector": ["30", 0],
+                   "guide_size": 640, "guide_size_for": True, "max_size": 1024,
+                   "seed": int(seed) + 11111, "steps": 20, "cfg": 5.0,
+                   "sampler_name": "euler", "scheduler": "normal",
+                   "denoise": 0.45, "feather": 5, "noise_mask": True,
+                   "force_inpaint": True, "bbox_threshold": 0.5,
+                   "bbox_dilation": 10, "bbox_crop_factor": 3.0,
+                   "sam_detection_hint": "center-1", "sam_dilation": 0,
+                   "sam_threshold": 0.93, "sam_bbox_expansion": 0,
+                   "sam_mask_hint_threshold": 0.7,
+                   "sam_mask_hint_use_negative": "False",
+                   "drop_size": 10, "wildcard": "", "cycle": 1,
+               }},
+        "7": {"class_type": "SaveImage",
+              "inputs": {"images": ["32", 0],
+                         "filename_prefix": "animeforge_anime_hires"}},
+    }
+
+
+def _comfy_image_anime_hires(prompt: str, w: int, h: int, seed: int) -> bytes | None:
+    """Generate Noct.Co-tier anime scene art via local ComfyUI.
+
+    Returns PNG bytes on success, None on failure. Caller falls back to
+    Pollinations on None so a broken local GPU never blocks an export.
+    """
+    if not COMFY_LOCAL_URL or _comfy_locked():
+        return None
+    neg = (
+        "lowres, bad anatomy, bad hands, text, error, missing fingers, "
+        "extra digit, fewer digits, cropped, worst quality, low quality, "
+        "normal quality, jpeg artifacts, signature, watermark, username, "
+        "blurry, ugly, deformed, mutated, multiple heads, asymmetric eyes, "
+        "bad face, poorly drawn face, poorly drawn hands, "
+        "photorealistic, 3d render, photograph, real photo"
+    )
+    seed_val = int(seed) % 2147483647
+    w64 = max(512, (w // 64) * 64)
+    h64 = max(512, (h // 64) * 64)
+    base = COMFY_LOCAL_URL
+    headers = _comfy_headers()
+    try:
+        workflow = _comfy_workflow_anime_hires(prompt, neg, w64, h64, seed_val)
+        sub = http.post(f"{base}/prompt",
+                        json={"prompt": workflow, "client_id": "animeforge-anime-hires"},
+                        headers=headers, timeout=30)
+        sub.raise_for_status()
+        prompt_id = sub.json().get("prompt_id")
+        if not prompt_id:
+            _mark_comfy_locked("anime hires: no prompt_id")
+            return None
+        deadline = time.time() + 150
+        fname = subfolder = None
+        while time.time() < deadline:
+            time.sleep(3)
+            try:
+                h_resp = http.get(f"{base}/history/{prompt_id}", headers=headers, timeout=8)
+                hist = h_resp.json().get(prompt_id) or {}
+                out = hist.get("outputs") or {}
+                imgs = (out.get("7") or {}).get("images") or []
+                if imgs:
+                    fname = imgs[0].get("filename")
+                    subfolder = imgs[0].get("subfolder", "")
+                    break
+            except Exception:
+                continue
+        if not fname:
+            return None
+        r = http.get(f"{base}/view",
+                     params={"filename": fname, "subfolder": subfolder, "type": "output"},
+                     headers=headers, timeout=30)
+        r.raise_for_status()
+        return r.content
+    except Exception as exc:
+        _mark_comfy_locked(f"anime hires: {str(exc)[:80]}")
+        return None
+
+
 def _comfy_workflow_photoreal(prompt: str, neg: str, w: int, h: int, seed: int) -> dict:
     """ComfyUI workflow for CyberRealistic Pony with Hi-Res Fix + FaceDetailer.
 
@@ -2537,6 +2681,18 @@ def do_export(job_id, story, mode, quality="1080p", animate=False, style_key=DEF
                 img_bytes = _comfy_image_photoreal(raw_prompt, W, H, seed)
                 if img_bytes:
                     job["message"] = f"Scene {i+1}/{n} — photoreal art ready ✓"
+            # ANIME HIRES path (admin + comfy_local + any non-photoreal style):
+            # Illustrious XL + 4x-UltraSharp + FaceDetailer. Same Noct.Co-tier
+            # treatment as the photoreal pipeline, just with the anime stack.
+            # Added 2026-05-25 after Justen showed reference shots and said the
+            # single-pass Pollinations art on every style "looked like crap".
+            # Falls through to Pollinations on any failure.
+            elif (style_key != "photoreal"
+                    and COMFY_LOCAL_URL and not _comfy_locked()):
+                job["message"] = f"Scene {i+1}/{n} — generating hires anime art on local GPU…"
+                img_bytes = _comfy_image_anime_hires(raw_prompt, W, H, seed)
+                if img_bytes:
+                    job["message"] = f"Scene {i+1}/{n} — hires anime art ready ✓"
             if not img_bytes:
                 # Pollinations fallback — retry + model fallback (flux x2 -> turbo)
                 # so one slow Pollinations request can't stall the whole export.
