@@ -2511,7 +2511,7 @@ def _comfy_workflow_cogvideox_i2v(image_filename: str, prompt: str, seed: int,
     }
 
 
-def animate_scene_comfy(img_path, prompt, tmp_dir, scene_idx, job, length: int = 49,
+def animate_scene_comfy(img_path, prompt, tmp_dir, scene_idx, job, length: int = 121,
                         backend: str = "wan"):
     """Animate a scene using the local ComfyUI tunnel (admin tier path).
 
@@ -2520,9 +2520,13 @@ def animate_scene_comfy(img_path, prompt, tmp_dir, scene_idx, job, length: int =
     Total request takes ~3-5 minutes on the 4070 Ti SUPER for a 5-sec clip.
 
     `length` is the Wan22ImageToVideoLatent frame count; valid values satisfy
-    (length-1) %% 4 == 0 (49 = 2s, 81 = 3.4s, 121 = 5s at 24fps). Export path
-    keeps length=49 to fit Render's 512 MB worker; scene-viewer path uses 81
-    for a smoother feel since it's only one clip at a time.
+    (length-1) %% 4 == 0 (49 = 2s, 81 = 3.4s, 121 = 5s at 24fps).
+    Default bumped to 121 (5 sec) on 2026-05-25: the per-scene duration is
+    `max(audio_dur + 3, MIN_DUR[mode])` which for "short" mode is 30 sec
+    minimum. With 49-frame clips that meant looping the same 2 sec of
+    motion 15 times per scene — looked like a broken GIF. 121 cuts loop
+    count to ~6 and each loop is a meaningful sequence. Costs ~2.5x GPU
+    time per scene but the result is actually watchable.
     """
     if not COMFY_LOCAL_URL or _comfy_locked():
         return None
